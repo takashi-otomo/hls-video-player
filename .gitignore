@@ -1,0 +1,15 @@
+node_modules/
+npm-debug.log*
+.DS_Store
+.env
+.env.local
+coverage/
+
+# Generated media assets — commit only README placeholders
+media/source/*
+media/hls/*
+media/sprites/*
+!media/source/.gitkeep
+!media/hls/.gitkeep
+!media/sprites/.gitkeep
+!media/source/README.md

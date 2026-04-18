@@ -1,0 +1,32 @@
+{
+  "name": "hls-video-player-backend",
+  "version": "1.0.0",
+  "description": "HLS video streaming backend with FFmpeg conversion and sprite thumbnail generation",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "jest --detectOpenHandles",
+    "test:watch": "jest --watch",
+    "convert": "node scripts/convert.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "multer": "^1.4.5-lts.1"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "supertest": "^7.0.0"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "testMatch": [
+      "**/__tests__/**/*.test.js"
+    ],
+    "testPathIgnorePatterns": [
+      "/node_modules/",
+      "/fixtures/"
+    ]
+  }
+}

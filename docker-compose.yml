@@ -1,0 +1,15 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    container_name: hls-video-backend
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - MEDIA_ROOT=/media
+      - FRONTEND_ROOT=/frontend
+    volumes:
+      - ./media:/media
+      - ./frontend/public:/frontend:ro
+    restart: unless-stopped

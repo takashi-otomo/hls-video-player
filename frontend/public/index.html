@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HLS Video Library</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="site-header">
+    <h1>HLS Video Library</h1>
+    <p class="tagline">MP4 → HLS アダプティブストリーミング / シークバーサムネイル対応</p>
+  </header>
+
+  <main class="container">
+    <section>
+      <h2>ライブラリ</h2>
+      <p id="library-status" class="status">読み込み中…</p>
+      <ul id="video-list" class="video-list"></ul>
+    </section>
+
+    <section class="help-panel">
+      <h2>動画を追加する</h2>
+      <p>
+        <code>media/source/</code> に MP4 を配置し、以下を実行すると HLS とスプライトが生成されます。
+      </p>
+      <pre><code>cd backend
+npm run convert -- ../media/source/your-video.mp4</code></pre>
+      <p>変換後にこのページを再読み込みすると一覧に表示されます。</p>
+    </section>
+  </main>
+
+  <script src="/library.js"></script>
+</body>
+</html>
