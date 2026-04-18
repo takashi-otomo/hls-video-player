@@ -40,14 +40,19 @@
   }
 
   function attachSeekbarPreview(player, sprite) {
-    const { url, tileWidth, tileHeight, columns, interval } = sprite;
+    // 後方互換: 旧形式 (url 単体) と新形式 (sheets 配列) を共に受け付ける
+    const sheets = sprite.sheets && sprite.sheets.length ? sprite.sheets : [sprite.url];
+    const { tileWidth, tileHeight, columns, interval } = sprite;
+    const rows = sprite.rows || 10;
+    const tilesPerSheet = rows * columns;
+    let currentSheet = -1;
 
     const tooltip = document.createElement('div');
     tooltip.className = 'vjs-seek-preview';
     tooltip.style.cssText = `
       position: absolute; pointer-events: none; bottom: 34px;
       width: ${tileWidth}px; height: ${tileHeight}px;
-      background-image: url("${url}"); background-repeat: no-repeat;
+      background-repeat: no-repeat;
       border: 2px solid rgba(255, 255, 255, 0.85); border-radius: 4px;
       box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
       transform: translateX(-50%); display: none; z-index: 2;
@@ -62,8 +67,8 @@
     `;
     tooltip.appendChild(timeLabel);
 
-    const preloader = new Image();
-    preloader.src = url;
+    // 全シート事前ロード（巨大動画でも先頭シート分だけ消費されるので合計サイズは小）
+    sheets.forEach((url) => { const img = new Image(); img.src = url; });
 
     player.ready(() => {
       const progressControl = player.controlBar.progressControl.el();
@@ -88,9 +93,16 @@
       const ratio = clamp((evt.clientX - rect.left) / rect.width, 0, 1);
       const time = ratio * duration;
 
-      const index = Math.min(Math.floor(time / interval), Math.floor(duration / interval));
-      const x = (index % columns) * tileWidth;
-      const y = Math.floor(index / columns) * tileHeight;
+      const globalIndex = Math.min(Math.floor(time / interval), Math.floor(duration / interval));
+      const sheetIdx = Math.min(Math.floor(globalIndex / tilesPerSheet), sheets.length - 1);
+      const localIndex = globalIndex - sheetIdx * tilesPerSheet;
+      const x = (localIndex % columns) * tileWidth;
+      const y = Math.floor(localIndex / columns) * tileHeight;
+
+      if (sheetIdx !== currentSheet) {
+        tooltip.style.backgroundImage = `url("${sheets[sheetIdx]}")`;
+        currentSheet = sheetIdx;
+      }
 
       tooltip.style.display = 'block';
       tooltip.style.left = `${ratio * rect.width}px`;

@@ -39,17 +39,43 @@ describe('listVideos', () => {
     fs.writeFileSync(path.join(tmpRoot, 'sprites', `${id}.jpg`), 'fake');
     fs.writeFileSync(path.join(tmpRoot, 'sprites', `${id}.vtt`), 'WEBVTT');
     fs.writeFileSync(path.join(tmpRoot, 'sprites', `${id}.json`), JSON.stringify({
-      tileWidth: 160, tileHeight: 90, columns: 10, interval: 10,
+      tileWidth: 160, tileHeight: 90, columns: 10, rows: 10, interval: 10, tileCount: 8, sheetCount: 1,
     }));
 
     const videos = listVideos(tmpRoot);
     expect(videos[0].sprite).toEqual({
-      url: expect.stringContaining(`${id}.jpg`),
+      sheets: [`/sprites/${id}.jpg`],
+      sheetCount: 1,
       vttUrl: expect.stringContaining(`${id}.vtt`),
       tileWidth: 160,
       tileHeight: 90,
       columns: 10,
+      rows: 10,
       interval: 10,
+      tileCount: 8,
     });
+  });
+
+  test('supports multi-sheet sprites (<id>-1.jpg, <id>-2.jpg, …)', () => {
+    const id = 'longvideo';
+    fs.mkdirSync(path.join(tmpRoot, 'hls', id), { recursive: true });
+    fs.writeFileSync(path.join(tmpRoot, 'hls', id, 'master.m3u8'), '#EXTM3U');
+    fs.writeFileSync(path.join(tmpRoot, 'sprites', `${id}-1.jpg`), 'a');
+    fs.writeFileSync(path.join(tmpRoot, 'sprites', `${id}-2.jpg`), 'b');
+    fs.writeFileSync(path.join(tmpRoot, 'sprites', `${id}-3.jpg`), 'c');
+    fs.writeFileSync(path.join(tmpRoot, 'sprites', `${id}.vtt`), 'WEBVTT');
+    fs.writeFileSync(path.join(tmpRoot, 'sprites', `${id}.json`), JSON.stringify({
+      tileWidth: 160, tileHeight: 90, columns: 10, rows: 10, interval: 10, tileCount: 235, sheetCount: 3,
+    }));
+
+    const videos = listVideos(tmpRoot);
+    expect(videos[0].sprite.sheetCount).toBe(3);
+    expect(videos[0].sprite.sheets).toEqual([
+      '/sprites/longvideo-1.jpg',
+      '/sprites/longvideo-2.jpg',
+      '/sprites/longvideo-3.jpg',
+    ]);
+    expect(videos[0].sprite.rows).toBe(10);
+    expect(videos[0].sprite.tileCount).toBe(235);
   });
 });
