@@ -7,7 +7,8 @@
     const video = await res.json();
 
     const el = document.createElement('video-js');
-    el.className = 'video-js vjs-default-skin vjs-big-play-centered vjs-fluid';
+    // aspectRatio option 指定時は fluid クラスが不要（むしろ干渉するので付けない）
+    el.className = 'video-js vjs-default-skin vjs-big-play-centered';
     el.setAttribute('controls', '');
     el.setAttribute('preload', 'auto');
     const source = document.createElement('source');
@@ -20,7 +21,8 @@
 
     const player = videojs(el, {
       playbackRates: [0.5, 1, 1.25, 1.5, 2],
-      fluid: true,
+      // サムネイルと統一した 16:9 枠で固定。動画の実アスペクト比が異なっても letterbox で表示
+      aspectRatio: '16:9',
       html5: {
         vhs: { overrideNative: true, enableLowInitialPlaylist: true },
       },
