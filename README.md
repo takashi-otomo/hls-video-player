@@ -97,13 +97,74 @@ npm run dev        # watch モード
 
 ブラウザで http://localhost:3000 を開くと一覧が表示されます。
 
-## Docker で起動
+## Docker で起動（推奨）
+
+3 サービス構成:
+
+| サービス | 役割 | ポート |
+|---|---|---|
+| **nginx** | 静的配信 (`/`, `/hls/*`, `/sprites/*`) + `/api/*` のリバースプロキシ | host: `8080` → container: `80` |
+| **backend** | Express API (`/api/*`) | 内部のみ (`expose: 3000`) |
+| **converter** | 一時起動の FFmpeg 変換タスク（`profiles: ["tools"]`） | — |
+
+### 1. ビルド & 起動
 
 ```bash
-docker compose up --build
+docker compose up -d --build
 ```
 
-`media/` と `frontend/public/` はボリュームマウントされるため、ホストで変換した動画がそのまま配信されます。
+http://localhost:8080 を開くとライブラリが表示されます。`docker-compose.override.yml` により開発時は `node --watch` でホットリロードします。本番モードで起動するには:
+
+```bash
+docker compose -f docker-compose.yml up -d
+```
+
+### 2. 動画を変換（コンテナ内 FFmpeg）
+
+```bash
+# media/source/your-video.mp4 を配置してから
+docker compose run --rm converter /media/source/your-video.mp4 my-id
+```
+
+- ローカルに FFmpeg をインストール不要
+- `media/` はバインドマウントなのでホスト側にも変換結果が残る
+- `my-id` 省略時はファイル名から自動生成
+
+### 3. 停止 / ログ
+
+```bash
+docker compose logs -f nginx backend
+docker compose down
+```
+
+### アーキテクチャ図
+
+```
+              ┌──────────────────────┐
+   :8080 ───▶│  nginx:1.27-alpine   │
+              │  - / → static html   │
+              │  - /hls/ → /media/hls│
+              │  - /sprites/ → /media/sprites
+              │  - /api/ → backend   │
+              └───────┬──────────────┘
+                      │ HTTP
+                      ▼
+              ┌──────────────────────┐
+              │ backend (node:22)    │
+              │ + ffmpeg (alpine)    │
+              │ - /api/videos        │
+              │ - healthcheck        │
+              └──────────────────────┘
+
+  converter（one-shot）───▶ ffmpeg → media/hls, media/sprites
+```
+
+### nginx の要点（`nginx/nginx.conf`）
+
+- `types {}` ブロックで `.m3u8` → `application/vnd.apple.mpegurl`, `.ts` → `video/mp2t`, `.vtt` → `text/vtt` を明示
+- `.ts` は `Cache-Control: public, max-age=31536000, immutable`、`.m3u8` は `no-cache`
+- `Accept-Ranges: bytes` が自動で有効（Range リクエストで部分取得 → シーク高速化）
+- 共通 CORS ヘッダで MSE / hls.js の cross-origin シナリオに対応
 
 ## 主要 API
 

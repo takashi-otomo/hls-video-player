@@ -18,6 +18,8 @@ function buildVariantArgs(variant, outDir, segmentSeconds, gop) {
     '-vf', scale,
     '-c:a', 'aac', '-ar', '48000', '-b:a', variant.audioBitrate,
     '-c:v', 'h264', '-profile:v', 'main', '-crf', String(variant.crf),
+    // H.264 main profile は 4:2:0 のみ対応。ソースが 4:4:4 / 10bit でも安全に配信できるよう強制変換
+    '-pix_fmt', 'yuv420p',
     '-sc_threshold', '0',
     '-g', String(gop), '-keyint_min', String(gop),
     '-hls_time', String(segmentSeconds),

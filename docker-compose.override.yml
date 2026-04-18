@@ -1,0 +1,19 @@
+# Dev override: `docker compose up` で自動適用。
+# 本番で切りたい場合は `-f docker-compose.yml` を明示。
+services:
+  backend:
+    command: ["node", "--watch", "src/index.js"]
+    volumes:
+      - ./backend/src:/app/src:ro
+      - ./backend/scripts:/app/scripts:ro
+      - ./media:/media
+    environment:
+      - NODE_ENV=development
+
+  nginx:
+    # 開発中は設定変更を即反映するため ro のままだが、reload を手軽に:
+    # docker compose exec nginx nginx -s reload
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./frontend/public:/usr/share/nginx/html:ro
+      - ./media:/media:ro
