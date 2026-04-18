@@ -23,8 +23,10 @@ async function generateSprite({
   const spriteFilename = sheetCount === 1 ? `${videoId}.jpg` : `${videoId}-%d.jpg`;
   const spritePath = path.join(outputDir, spriteFilename);
 
+  const threads = parseInt(process.env.FFMPEG_THREADS || '2', 10);
   const args = [
     '-y',
+    '-threads', String(threads),
     '-i', inputPath,
     '-vf', `fps=1/${intervalSeconds},scale=${tileWidth}:${tileHeight}:force_original_aspect_ratio=decrease,pad=${tileWidth}:${tileHeight}:(ow-iw)/2:(oh-ih)/2,tile=${columns}x${rows}`,
     '-an',

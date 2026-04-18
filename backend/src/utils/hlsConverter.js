@@ -10,14 +10,20 @@ const DEFAULT_VARIANTS = [
   { name: '240p', height: 240, videoBitrate: '400k',  maxrate: '480k',  bufsize: '800k',  audioBitrate: '64k',  crf: 32, resolution: '426x240',  bandwidth: 400000 },
 ];
 
-function buildVariantArgs(variant, outDir, segmentSeconds, gop) {
+function buildVariantArgs(variant, outDir, segmentSeconds, gop, { preset, threads }) {
   const scale = `scale=w=-2:h=${variant.height}:force_original_aspect_ratio=decrease:force_divisible_by=2`;
   const playlist = path.join(outDir, `${variant.name}.m3u8`);
   const segPattern = path.join(outDir, `${variant.name}_%03d.ts`);
   return [
     '-vf', scale,
     '-c:a', 'aac', '-ar', '48000', '-b:a', variant.audioBitrate,
-    '-c:v', 'h264', '-profile:v', 'main', '-crf', String(variant.crf),
+    '-c:v', 'h264', '-profile:v', 'main',
+    // CPU 抑制: preset は ultrafast→veryfast→faster→…→placebo の順で遅く＆画質向上。
+    // veryfast は medium 比で CPU 約半分、サイズ増加 20% 程度のバランス。
+    '-preset', preset,
+    // 各エンコーダあたりのスレッド数上限。デフォルト 2 (= 4variant 並列時に最大 8 スレッド)。
+    '-threads', String(threads),
+    '-crf', String(variant.crf),
     // H.264 main profile は 4:2:0 のみ対応。ソースが 4:4:4 / 10bit でも安全に配信できるよう強制変換
     '-pix_fmt', 'yuv420p',
     '-sc_threshold', '0',
@@ -36,6 +42,8 @@ async function convertMp4ToHls({
   variants = DEFAULT_VARIANTS,
   segmentSeconds = 4,
   fps = 24,
+  preset = process.env.FFMPEG_PRESET || 'veryfast',
+  threads = parseInt(process.env.FFMPEG_THREADS || '2', 10),
   onProgress,
 }) {
   fs.mkdirSync(outputDir, { recursive: true });
@@ -44,7 +52,7 @@ async function convertMp4ToHls({
 
   const args = ['-y', '-i', inputPath];
   for (const v of variants) {
-    args.push(...buildVariantArgs(v, outputDir, segmentSeconds, gopSize));
+    args.push(...buildVariantArgs(v, outputDir, segmentSeconds, gopSize, { preset, threads }));
   }
 
   await runFfmpeg(args, { onProgress });
@@ -62,4 +70,4 @@ async function convertMp4ToHls({
   return { masterPath, variants: variants.map((v) => v.name) };
 }
 
-module.exports = { convertMp4ToHls, DEFAULT_VARIANTS };
+module.exports = { convertMp4ToHls, DEFAULT_VARIANTS, buildVariantArgs };

@@ -233,6 +233,46 @@ npm test
 - `videoCatalog.test.js` — ファイルシステム走査
 - `app.test.js` — HTTP レイヤ（supertest）
 
+## リソース制限（CPU / メモリ抑制）
+
+変換時に CPU・メモリが急増しないよう、以下の 3 層で上限をかけます。環境変数で調整可能です。
+
+### 1. コンテナ上限（Docker）
+
+`docker-compose.yml` の `deploy.resources.limits` で backend / converter に上限を設定。非 Swarm の `docker compose up` でも有効です。
+
+| 変数 | デフォルト | 意味 |
+|---|---|---|
+| `BACKEND_CPUS` | `2.0` | backend コンテナの最大 CPU 数 |
+| `BACKEND_MEMORY` | `2g` | backend コンテナのメモリ上限 |
+| `CONVERTER_CPUS` | `2.0` | converter コンテナ（one-shot）の最大 CPU |
+| `CONVERTER_MEMORY` | `2g` | converter コンテナのメモリ上限 |
+
+確認: `docker inspect hls-video-backend` の `HostConfig.NanoCpus` と `HostConfig.Memory`。
+
+### 2. FFmpeg エンコード設定
+
+| 変数 | デフォルト | 意味 |
+|---|---|---|
+| `FFMPEG_THREADS` | `2` | 各解像度エンコーダに割り当てるスレッド数。4 variants 並列なので実質 `threads × 4` |
+| `FFMPEG_PRESET` | `veryfast` | libx264 プリセット。`ultrafast` < `veryfast` < `fast` < `medium` の順で CPU 使用量増・画質向上 |
+
+### 3. プロセス優先度 (`nice`)
+
+| 変数 | デフォルト | 意味 |
+|---|---|---|
+| `FFMPEG_NICE` | `10` | `nice -n N` で FFmpeg の CPU スケジューリング優先度を下げる。対話操作や他プロセスへの影響を軽減（0 で通常優先、19 で最低） |
+
+### 実測例（60 秒 720p ソース → 4 段階 ABR）
+
+デフォルト (`FFMPEG_THREADS=2`, `FFMPEG_PRESET=veryfast`, CPU 上限 2 コア) で:
+
+- 変換所要時間: 約 16 秒
+- CPU 使用率: 安定して 200% (= 2 コア張り付き、ホスト他の CPU に影響なし)
+- メモリピーク: 約 344 MiB
+
+CPU が余裕なときは `FFMPEG_THREADS=4`, `FFMPEG_PRESET=fast` などで高画質化、逆に動作を極限まで軽くしたいときは `FFMPEG_THREADS=1`, `FFMPEG_PRESET=ultrafast` + `BACKEND_CPUS=1.0` を推奨。
+
 ## 本番運用での注意
 
 - **CSP**: Video.js VHS は MSE 経由で Blob URL を生成するため、`media-src blob:` / `worker-src blob:` を CSP に含める

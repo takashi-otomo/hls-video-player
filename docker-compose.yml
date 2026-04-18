@@ -9,6 +9,10 @@ services:
       - MEDIA_ROOT=/media
       # nginx が静的フロントを配信するので backend 側では無効化
       - FRONTEND_ROOT=
+      # FFmpeg CPU/メモリ抑制（各値の詳細は README の「リソース制限」を参照）
+      - FFMPEG_THREADS=${FFMPEG_THREADS:-2}
+      - FFMPEG_PRESET=${FFMPEG_PRESET:-veryfast}
+      - FFMPEG_NICE=${FFMPEG_NICE:-10}
     volumes:
       - ./media:/media
     # ホスト露出せず、nginx 経由でのみアクセス
@@ -16,6 +20,12 @@ services:
       - "3000"
     restart: unless-stopped
     networks: [app]
+    # リソース上限（変換時の CPU/メモリ暴走防止）
+    deploy:
+      resources:
+        limits:
+          cpus: "${BACKEND_CPUS:-2.0}"
+          memory: "${BACKEND_MEMORY:-2g}"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 15s
@@ -47,7 +57,15 @@ services:
       - ./media:/media
     environment:
       - MEDIA_ROOT=/media
+      - FFMPEG_THREADS=${FFMPEG_THREADS:-2}
+      - FFMPEG_PRESET=${FFMPEG_PRESET:-veryfast}
+      - FFMPEG_NICE=${FFMPEG_NICE:-10}
     entrypoint: ["node", "scripts/convert.js"]
+    deploy:
+      resources:
+        limits:
+          cpus: "${CONVERTER_CPUS:-2.0}"
+          memory: "${CONVERTER_MEMORY:-2g}"
 
 networks:
   app:
