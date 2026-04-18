@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { runFfmpeg } = require('./ffmpegRunner');
 const { buildMasterPlaylist } = require('./masterPlaylist');
+const { createProgressParser } = require('./progressParser');
 
 const DEFAULT_VARIANTS = [
   { name: '720p', height: 720, videoBitrate: '3000k', maxrate: '3600k', bufsize: '6000k', audioBitrate: '128k', crf: 26, resolution: '1280x720', bandwidth: 3000000 },
@@ -44,6 +45,7 @@ async function convertMp4ToHls({
   fps = 24,
   preset = process.env.FFMPEG_PRESET || 'veryfast',
   threads = parseInt(process.env.FFMPEG_THREADS || '2', 10),
+  durationSeconds = null,
   onProgress,
 }) {
   fs.mkdirSync(outputDir, { recursive: true });
@@ -55,7 +57,12 @@ async function convertMp4ToHls({
     args.push(...buildVariantArgs(v, outputDir, segmentSeconds, gopSize, { preset, threads }));
   }
 
-  await runFfmpeg(args, { onProgress });
+  // 進捗コールバックが指定されていれば stderr の time= から進捗率を計算
+  const stderrHandler = onProgress
+    ? createProgressParser({ durationSeconds, onRatio: onProgress })
+    : undefined;
+
+  await runFfmpeg(args, { onProgress: stderrHandler });
 
   const master = buildMasterPlaylist(
     variants.map((v) => ({

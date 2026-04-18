@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { runFfmpeg, probeDurationSeconds } = require('./ffmpegRunner');
 const { generateVttContent } = require('./vttBuilder');
+const { createProgressParser } = require('./progressParser');
 
 async function generateSprite({
   inputPath,
@@ -12,10 +13,12 @@ async function generateSprite({
   tileHeight = 90,
   columns = 10,
   rows = 10,
+  durationSeconds = null,
+  onProgress,
 }) {
   fs.mkdirSync(outputDir, { recursive: true });
 
-  const duration = await probeDurationSeconds(inputPath);
+  const duration = durationSeconds || await probeDurationSeconds(inputPath);
   const totalTiles = Math.max(1, Math.ceil(duration / intervalSeconds));
   const tilesPerSheet = columns * rows;
   const sheetCount = Math.ceil(totalTiles / tilesPerSheet);
@@ -36,7 +39,11 @@ async function generateSprite({
   if (sheetCount > 1) args.push('-f', 'image2');
   args.push(spritePath);
 
-  await runFfmpeg(args);
+  const stderrHandler = onProgress
+    ? createProgressParser({ durationSeconds: duration, onRatio: onProgress })
+    : undefined;
+
+  await runFfmpeg(args, { onProgress: stderrHandler });
 
   const spriteUrl = `/sprites/${videoId}.jpg`;
   const vttContent = generateVttContent({

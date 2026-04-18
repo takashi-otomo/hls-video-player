@@ -209,15 +209,36 @@
   function updateTrFromJob(tr, job) {
     const statusCell = tr.querySelector('.status-cell');
     statusCell.innerHTML = '';
-    if (job.state === 'pending') statusCell.appendChild(badge('待機中', 'running'));
-    else if (job.state === 'running') {
-      const stage = job.stage === 'sprite' ? 'サムネイル生成中' : 'HLS変換中';
-      statusCell.appendChild(badge(`🔄 ${stage}`, 'running'));
+    if (job.state === 'pending') {
+      statusCell.appendChild(badge('待機中', 'running'));
+    } else if (job.state === 'running') {
+      statusCell.appendChild(renderProgress(job));
     } else if (job.state === 'completed') {
       statusCell.appendChild(badge('✓ 変換済', 'ok'));
     } else if (job.state === 'failed') {
       statusCell.appendChild(badge(`✗ 失敗: ${job.error || ''}`.slice(0, 80), 'error'));
     }
+  }
+
+  function renderProgress(job) {
+    const stageLabel = ({
+      probe: '解析中',
+      hls: 'HLS変換中',
+      sprite: 'サムネイル生成中',
+    })[job.stage] || '処理中';
+
+    const overall = Math.max(0, Math.min(1, job.progress || 0));
+    const pct = Math.round(overall * 100);
+
+    const wrap = document.createElement('div');
+    wrap.className = 'progress';
+    wrap.innerHTML = `
+      <div class="progress-track" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100">
+        <div class="progress-bar" style="width: ${pct}%"></div>
+      </div>
+      <span class="progress-label">${escapeHtml(stageLabel)} <strong>${pct}%</strong></span>
+    `;
+    return wrap;
   }
 
   function badge(text, variant) {
