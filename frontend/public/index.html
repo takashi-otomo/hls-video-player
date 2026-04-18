@@ -17,28 +17,23 @@
     <section>
       <div class="section-head">
         <h2>動画一覧</h2>
-        <button id="refresh-sources" class="btn btn-ghost" title="一覧を更新">↻ 更新</button>
+        <div class="head-actions">
+          <div class="view-toggle" role="tablist" aria-label="表示切替">
+            <button class="view-btn" data-view="card" aria-pressed="true" title="カード表示">▦ カード</button>
+            <button class="view-btn" data-view="list" aria-pressed="false" title="リスト表示">≡ リスト</button>
+          </div>
+          <button id="refresh-sources" class="btn btn-ghost" title="一覧を更新">↻ 更新</button>
+        </div>
       </div>
       <p id="sources-status" class="status">読み込み中…</p>
-      <table id="sources-table" class="sources-table" hidden>
-        <thead>
-          <tr>
-            <th>ファイル名</th>
-            <th class="num">サイズ</th>
-            <th>更新日時</th>
-            <th>状態</th>
-            <th>操作</th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>
+      <div id="sources-container"></div>
     </section>
 
     <details class="help-panel">
       <summary>動画を追加する</summary>
       <p>
         <code>media/source/</code> に <code>.mp4 / .mov / .mkv / .webm</code> を配置し、
-        上のテーブルの <strong>変換</strong> ボタンを押してください。
+        一覧の <strong>変換</strong> ボタンを押してください。
       </p>
       <p>CLI から変換する場合:</p>
       <pre><code>docker compose run --rm converter /media/source/your-video.mp4</code></pre>

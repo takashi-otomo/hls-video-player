@@ -50,6 +50,7 @@ describe('listSources', () => {
       videoId: 'a',
       sizeBytes: 3,
       converted: false,
+      sprite: null,
     });
     expect(typeof result[0].modifiedAt).toBe('string');
   });
@@ -60,6 +61,27 @@ describe('listSources', () => {
     fs.writeFileSync(path.join(tmpRoot, 'hls', 'b', 'master.m3u8'), '#EXTM3U');
     const result = listSources(tmpRoot);
     expect(result[0].converted).toBe(true);
+  });
+
+  test('includes sprite info for converted sources (for card thumbnails)', () => {
+    fs.writeFileSync(path.join(tmpRoot, 'source', 'c.mp4'), 'CC');
+    fs.mkdirSync(path.join(tmpRoot, 'hls', 'c'), { recursive: true });
+    fs.writeFileSync(path.join(tmpRoot, 'hls', 'c', 'master.m3u8'), '#EXTM3U');
+    fs.mkdirSync(path.join(tmpRoot, 'sprites'), { recursive: true });
+    fs.writeFileSync(path.join(tmpRoot, 'sprites', 'c.jpg'), 'fake');
+    fs.writeFileSync(path.join(tmpRoot, 'sprites', 'c.vtt'), 'WEBVTT');
+    fs.writeFileSync(path.join(tmpRoot, 'sprites', 'c.json'), JSON.stringify({
+      tileWidth: 160, tileHeight: 90, columns: 10, rows: 10, interval: 10, tileCount: 3, sheetCount: 1,
+    }));
+    const result = listSources(tmpRoot);
+    expect(result[0].sprite).toMatchObject({
+      sheets: ['/sprites/c.jpg'],
+      sheetCount: 1,
+      tileWidth: 160,
+      tileHeight: 90,
+      columns: 10,
+      rows: 10,
+    });
   });
 
   test('supports common video extensions (.mov, .mkv, .webm)', () => {

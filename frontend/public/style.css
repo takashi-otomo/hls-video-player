@@ -51,8 +51,34 @@ body {
   justify-content: space-between;
   gap: 1rem;
   margin-top: 2rem;
+  flex-wrap: wrap;
 }
 .section-head h2 { margin: 0; }
+.head-actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+
+/* 表示モード切替 */
+.view-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.view-btn {
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s, color 0.15s;
+}
+.view-btn + .view-btn { border-left: 1px solid var(--border); }
+.view-btn:hover { color: var(--text); }
+.view-btn[aria-pressed="true"] {
+  background: var(--accent);
+  color: #04121f;
+}
 
 .sources-table {
   width: 100%;
@@ -155,7 +181,7 @@ body {
 .btn[disabled] { opacity: 0.6; cursor: not-allowed; }
 .btn-play.is-open { background: #2a2f39; color: var(--text); border-color: var(--accent); }
 
-/* 動画一覧に差し込まれるインラインプレイヤー行 */
+/* 動画一覧に差し込まれるインラインプレイヤー（リスト / カード共通） */
 .sources-table tr.is-expanded td { border-bottom: none; }
 .sources-table tr.player-row td {
   padding: 0;
@@ -165,6 +191,7 @@ body {
 .inline-player {
   padding: 1rem;
   animation: inline-player-in 0.18s ease-out;
+  position: relative;
 }
 .inline-player__mount {
   max-width: 960px;
@@ -176,6 +203,129 @@ body {
   from { opacity: 0; transform: translateY(-4px); }
   to   { opacity: 1; transform: translateY(0); }
 }
+
+/* ===== カード一覧（レスポンシブグリッド） ===== */
+.video-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  grid-auto-flow: dense;
+  gap: 1rem;
+}
+.video-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  transition: border-color 0.15s, transform 0.15s;
+}
+.video-card:hover { border-color: var(--accent); transform: translateY(-2px); }
+.video-card.is-expanded { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+
+.video-card__thumb {
+  aspect-ratio: 16 / 9;
+  background-color: #0a0c10;
+  background-repeat: no-repeat;
+  background-position: 0 0;
+  border-bottom: 1px solid var(--border);
+  position: relative;
+}
+.video-card__thumb--placeholder {
+  background: repeating-linear-gradient(45deg, #0a0c10 0 10px, #14171f 10px 20px);
+}
+.video-card__thumb--placeholder::before {
+  content: "—";
+  position: absolute; inset: 0;
+  display: grid; place-items: center;
+  font-size: 2rem; color: var(--muted);
+}
+.video-card__body {
+  padding: 0.75rem 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  flex: 1;
+}
+.video-card__title {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+  word-break: break-all;
+  line-height: 1.3;
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+}
+.video-card__meta {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.video-card__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: auto;
+  flex-wrap: wrap;
+}
+.video-card__actions .status-cell,
+.video-card__actions .action-cell { display: flex; align-items: center; }
+
+/* カード一覧の中に挟まる全幅プレイヤー */
+.player-expansion {
+  grid-column: 1 / -1;
+  background: #050709;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  animation: inline-player-in 0.18s ease-out;
+}
+
+/* ===== 画質セレクタ（プレイヤー右上） ===== */
+.vjs-quality-wrap {
+  position: absolute;
+  top: 0.6rem;
+  right: 0.6rem;
+  z-index: 3;
+  font-family: inherit;
+}
+.vjs-quality-toggle {
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  padding: 0.28rem 0.6rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: inherit;
+  letter-spacing: 0.02em;
+}
+.vjs-quality-toggle:hover { background: rgba(0, 0, 0, 0.88); }
+.vjs-quality-toggle::before { content: "⚙ "; opacity: 0.7; }
+.vjs-quality-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  background: rgba(0, 0, 0, 0.92);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+  padding: 0.25rem 0;
+  margin: 0;
+  list-style: none;
+  min-width: 7rem;
+  font-size: 0.85rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.vjs-quality-menu li {
+  padding: 0.35rem 0.9rem;
+  cursor: pointer;
+  user-select: none;
+}
+.vjs-quality-menu li:hover { background: rgba(255, 255, 255, 0.08); }
+.vjs-quality-menu li[aria-selected="true"] { color: var(--accent); }
+.vjs-quality-menu li[aria-selected="true"]::before { content: "✓ "; }
 
 .video-list {
   list-style: none;

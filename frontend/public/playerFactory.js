@@ -27,6 +27,7 @@
     });
 
     if (video.sprite) attachSeekbarPreview(player, video.sprite);
+    attachQualitySelector(player);
     player.options({ disableSeekWhileScrubbingOnMobile: true });
     player.on('error', () => console.error('playback error', player.error()));
 
@@ -109,6 +110,86 @@
       tooltip.style.backgroundPosition = `-${x}px -${y}px`;
       timeLabel.textContent = formatTime(time);
     }
+  }
+
+  // ユーザーが Auto / 240p / 360p / 480p / 720p など明示的に画質を選べる
+  // 独自の小さなドロップダウンをプレイヤー右上に配置。
+  // VHS の representations().enabled() を直接切り替える（Auto 時は全有効）。
+  function attachQualitySelector(player) {
+    const wrap = document.createElement('div');
+    wrap.className = 'vjs-quality-wrap';
+    wrap.innerHTML = `
+      <button type="button" class="vjs-quality-toggle" aria-haspopup="listbox" aria-expanded="false">
+        <span class="vjs-quality-current">Auto</span>
+      </button>
+      <ul class="vjs-quality-menu" role="listbox" hidden></ul>
+    `;
+    player.el().appendChild(wrap);
+
+    const toggle = wrap.querySelector('.vjs-quality-toggle');
+    const currentLabel = wrap.querySelector('.vjs-quality-current');
+    const menu = wrap.querySelector('.vjs-quality-menu');
+    let built = false;
+
+    function getReps() {
+      try {
+        const tech = player.tech({ IWillNotUseThisInPlugins: true });
+        return tech && tech.vhs && tech.vhs.representations ? tech.vhs.representations() : null;
+      } catch (_) { return null; }
+    }
+
+    function build() {
+      if (built) return true;
+      const reps = getReps();
+      if (!reps || reps.length === 0) return false;
+
+      // Sort representations by height (high → low) for display
+      const sorted = [...reps].sort((a, b) => (b.height || 0) - (a.height || 0));
+      const items = [{ label: 'Auto', idx: -1 }]
+        .concat(sorted.map((r) => ({
+          label: `${r.height}p`,
+          idx: reps.indexOf(r),
+          kbps: r.bandwidth ? Math.round(r.bandwidth / 1000) : null,
+        })));
+
+      menu.innerHTML = items.map((it, i) => `
+        <li role="option" data-idx="${it.idx}" ${i === 0 ? 'aria-selected="true"' : ''}>
+          ${it.label}${it.kbps ? ` <span style="opacity:0.55;font-size:0.75em">${it.kbps}kbps</span>` : ''}
+        </li>
+      `).join('');
+
+      menu.addEventListener('click', (e) => {
+        const li = e.target.closest('li');
+        if (!li) return;
+        const idx = parseInt(li.dataset.idx, 10);
+        if (idx === -1) reps.forEach((r) => r.enabled(true));
+        else reps.forEach((r, i) => r.enabled(i === idx));
+
+        menu.querySelectorAll('li').forEach((x) => x.removeAttribute('aria-selected'));
+        li.setAttribute('aria-selected', 'true');
+        currentLabel.textContent = li.textContent.trim().replace(/\s+\d+kbps$/, '').trim() || li.textContent.trim();
+        closeMenu();
+      });
+
+      built = true;
+      return true;
+    }
+
+    function openMenu() { menu.hidden = false; toggle.setAttribute('aria-expanded', 'true'); }
+    function closeMenu() { menu.hidden = true; toggle.setAttribute('aria-expanded', 'false'); }
+
+    toggle.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (!build()) return; // 再生リスト未ロード時は何もしない
+      menu.hidden ? openMenu() : closeMenu();
+    });
+
+    player.one('loadedmetadata', () => { build(); });
+
+    // 外側クリックでメニューを閉じる
+    const outsideClose = (e) => { if (!wrap.contains(e.target)) closeMenu(); };
+    document.addEventListener('click', outsideClose, { passive: true });
+    player.one('dispose', () => document.removeEventListener('click', outsideClose));
   }
 
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
