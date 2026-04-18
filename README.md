@@ -173,6 +173,10 @@ docker compose down
 | GET | `/api/health` | ヘルスチェック |
 | GET | `/api/videos` | 変換済み動画カタログ |
 | GET | `/api/videos/:id` | 個別動画メタ情報 |
+| GET | `/api/sources` | `media/source/` 内の動画ファイル一覧（`converted`, `activeJobId` 付き） |
+| POST | `/api/sources/:filename/convert` | 変換ジョブを起動（202、`{ jobId, videoId }` を返却） |
+| GET | `/api/jobs` | ジョブ一覧（新しい順） |
+| GET | `/api/jobs/:id` | ジョブ状態（`pending` / `running` / `completed` / `failed`） |
 | GET | `/hls/:id/master.m3u8` | マスタープレイリスト |
 | GET | `/hls/:id/:variant.m3u8` | 解像度別メディアプレイリスト |
 | GET | `/hls/:id/:variant_NNN.ts` | セグメント |
