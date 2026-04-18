@@ -9,7 +9,7 @@ MP4 ソースを HLS（HTTP Live Streaming）に変換し、ブラウザ上で *
   - VOD 向けに `hls_playlist_type=vod` を指定
 - **マスタープレイリスト生成**: 解像度と帯域幅を記述した `master.m3u8` をサーバーサイドで自動生成
 - **Video.js + VHS**: 追加プラグインなしでクロスブラウザに HLS を再生
-- **スプライトサムネイル**: FFmpeg の `tile` フィルタで単一画像を生成、`videojs-sprite-thumbnails` v2 で遅延読み込み
+- **シークバーサムネイルプレビュー**: FFmpeg の `tile` フィルタで単一画像を生成し、独自実装の tooltip（`background-position` で該当タイルをクリップ）でホバー／スクラブ時に表示
 - **WebVTT**: `#xywh=X,Y,W,H` Media Fragments URI 付きの VTT ファイルを自動生成（外部プレイヤーと互換）
 - **Express API**: `/api/videos`, `/hls/*`, `/sprites/*` を MIME 正しく配信
 - **Docker Compose**: FFmpeg 同梱の Node 22 Alpine イメージで即起動
@@ -207,9 +207,15 @@ Y = ⌊i / columns⌋ × tileHeight
 
 例: `columns=10`, `tileWidth=160`, `tileHeight=90` で i=12 のとき `(320, 90)` → VTT: `sprite.jpg#xywh=320,90,160,90`
 
-### 遅延読み込み
+### シークバープレビューの独自実装
 
-`videojs-sprite-thumbnails` v2.2 以降、スプライト画像は動画再生開始時ではなくユーザーがシークバーに触れた瞬間に初めてダウンロードされます。初期再生のネットワーク帯域を圧迫しません。
+外部プラグインに依存せず、`frontend/public/player.js` の `attachSeekbarPreview` 関数で実装しています:
+
+- `mousemove` / `touchmove` でシークバー上の座標 → 時刻 (秒) を計算
+- タイル index `i = floor(time / interval)` を算出し、`x = (i % columns) × tileWidth` / `y = floor(i / columns) × tileHeight`
+- 1 枚のスプライト画像を `background-image` に固定、`background-position: -Xpx -Ypx` で該当タイルをクリップ表示
+- マウント時に `new Image().src = url` でプリロード → 初回ホバーでもチラつきなし
+- バックエンドが生成する `/sprites/<id>.json` のメタ情報 (`tileWidth`, `tileHeight`, `columns`, `interval`) を使用するため、タイルレイアウトを変えても JS 側は変更不要
 
 ## テスト
 

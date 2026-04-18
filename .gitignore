@@ -4,6 +4,7 @@ npm-debug.log*
 .env
 .env.local
 coverage/
+.claude/
 
 # Generated media assets — commit only README placeholders
 media/source/*
