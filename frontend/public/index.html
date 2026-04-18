@@ -15,7 +15,7 @@
   <main class="container">
     <section>
       <div class="section-head">
-        <h2>ソースファイル</h2>
+        <h2>動画一覧</h2>
         <button id="refresh-sources" class="btn btn-ghost" title="一覧を更新">↻ 更新</button>
       </div>
       <p id="sources-status" class="status">読み込み中…</p>
@@ -33,21 +33,15 @@
       </table>
     </section>
 
-    <section>
-      <h2>ライブラリ（変換済）</h2>
-      <p id="library-status" class="status">読み込み中…</p>
-      <ul id="video-list" class="video-list"></ul>
-    </section>
-
-    <section class="help-panel">
-      <h2>動画を追加する</h2>
+    <details class="help-panel">
+      <summary>動画を追加する</summary>
       <p>
         <code>media/source/</code> に <code>.mp4 / .mov / .mkv / .webm</code> を配置し、
-        上の「ソースファイル」テーブルの <strong>変換</strong> ボタンを押してください。
+        上のテーブルの <strong>変換</strong> ボタンを押してください。
       </p>
       <p>CLI から変換する場合:</p>
       <pre><code>docker compose run --rm converter /media/source/your-video.mp4</code></pre>
-    </section>
+    </details>
   </main>
 
   <script src="/library.js"></script>

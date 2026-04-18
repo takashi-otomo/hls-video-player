@@ -3,16 +3,13 @@
   const sourcesTable = document.getElementById('sources-table');
   const sourcesBody = sourcesTable.querySelector('tbody');
   const refreshBtn = document.getElementById('refresh-sources');
-  const libraryList = document.getElementById('video-list');
-  const libraryStatus = document.getElementById('library-status');
 
   // videoId → setInterval handle（ジョブポーリング用）
   const jobPollers = new Map();
 
-  refreshBtn.addEventListener('click', () => { loadSources(); loadLibrary(); });
+  refreshBtn.addEventListener('click', loadSources);
 
   loadSources();
-  loadLibrary();
 
   async function loadSources() {
     try {
@@ -21,21 +18,9 @@
       const sources = await res.json();
       renderSources(sources);
     } catch (err) {
-      sourcesStatus.textContent = `ソース一覧の取得に失敗: ${err.message}`;
+      sourcesStatus.textContent = `一覧の取得に失敗: ${err.message}`;
       sourcesStatus.hidden = false;
       sourcesTable.hidden = true;
-    }
-  }
-
-  async function loadLibrary() {
-    try {
-      const res = await fetch('/api/videos');
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const videos = await res.json();
-      renderLibrary(videos);
-    } catch (err) {
-      libraryStatus.textContent = `ライブラリ取得失敗: ${err.message}`;
-      libraryStatus.hidden = false;
     }
   }
 
@@ -143,9 +128,7 @@
         if (job.state === 'completed' || job.state === 'failed') {
           clearInterval(interval);
           jobPollers.delete(videoId);
-          // 完了時はソース一覧とライブラリを更新
           await loadSources();
-          await loadLibrary();
         }
       } catch (err) {
         clearInterval(interval);
@@ -167,29 +150,6 @@
       statusCell.appendChild(badge('✓ 変換済', 'ok'));
     } else if (job.state === 'failed') {
       statusCell.appendChild(badge(`✗ 失敗: ${job.error || ''}`.slice(0, 80), 'error'));
-    }
-  }
-
-  function renderLibrary(videos) {
-    libraryList.innerHTML = '';
-    if (videos.length === 0) {
-      libraryStatus.textContent = '変換済みの動画はまだありません。';
-      libraryStatus.hidden = false;
-      return;
-    }
-    libraryStatus.hidden = true;
-    for (const v of videos) {
-      const li = document.createElement('li');
-      li.className = 'video-card';
-      const hasSprite = v.sprite ? '✅ プレビュー付き' : '— プレビューなし';
-      li.innerHTML = `
-        <a href="/player.html?id=${encodeURIComponent(v.id)}">
-          <h3>${escapeHtml(v.title)}</h3>
-          <p class="video-card__meta">id: <code>${escapeHtml(v.id)}</code></p>
-          <p class="video-card__meta">${hasSprite}</p>
-        </a>
-      `;
-      libraryList.appendChild(li);
     }
   }
 
