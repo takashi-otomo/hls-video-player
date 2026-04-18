@@ -7,6 +7,10 @@
   // videoId → setInterval handle（ジョブポーリング用）
   const jobPollers = new Map();
 
+  // 現在インライン展開中のプレイヤー情報（1件のみ）
+  // { videoId, triggerRow, playerRow, instance, button }
+  let expanded = null;
+
   refreshBtn.addEventListener('click', loadSources);
 
   loadSources();
@@ -25,6 +29,8 @@
   }
 
   function renderSources(sources) {
+    collapseExpanded(); // リスト再描画時は開いているプレイヤーを閉じる
+
     if (sources.length === 0) {
       sourcesStatus.textContent = 'media/source/ にファイルがありません。MP4 などを置いて「更新」を押してください。';
       sourcesStatus.hidden = false;
@@ -48,7 +54,6 @@
       sourcesBody.appendChild(tr);
       applyRowState(tr, s);
 
-      // アクティブジョブが残っていれば再開（ページ再読み込み対応）
       if (s.activeJobId) pollJob(s.activeJobId, s.videoId);
     }
   }
@@ -71,20 +76,82 @@
 
     if (source.converted) {
       statusCell.appendChild(badge('✓ 変換済', 'ok'));
-      const link = document.createElement('a');
-      link.className = 'btn btn-primary';
-      link.href = `/player.html?id=${encodeURIComponent(source.videoId)}`;
-      link.textContent = '▶ 再生';
-      actionCell.appendChild(link);
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-primary btn-play';
+      btn.type = 'button';
+      btn.textContent = '▶ 再生';
+      btn.addEventListener('click', () => togglePlayer(source.videoId, tr, btn));
+      actionCell.appendChild(btn);
       return;
     }
 
     statusCell.appendChild(badge('未変換', 'pending'));
     const btn = document.createElement('button');
     btn.className = 'btn btn-primary';
+    btn.type = 'button';
     btn.textContent = '変換';
     btn.addEventListener('click', () => triggerConvert(source.filename, source.videoId, tr));
     actionCell.appendChild(btn);
+  }
+
+  async function togglePlayer(videoId, triggerRow, button) {
+    // 同じ行を再クリック → 折りたたむ
+    if (expanded && expanded.videoId === videoId) {
+      collapseExpanded();
+      return;
+    }
+    // 別の行がすでに開いていれば畳んでから新しい行を開く
+    collapseExpanded();
+
+    const colCount = triggerRow.children.length;
+    const playerRow = document.createElement('tr');
+    playerRow.className = 'player-row';
+    const td = document.createElement('td');
+    td.colSpan = colCount;
+    const shell = document.createElement('div');
+    shell.className = 'inline-player';
+    const mount = document.createElement('div');
+    mount.className = 'inline-player__mount';
+    shell.appendChild(mount);
+    td.appendChild(shell);
+    playerRow.appendChild(td);
+    triggerRow.after(playerRow);
+
+    triggerRow.classList.add('is-expanded');
+    button.textContent = '▼ 閉じる';
+    button.classList.add('is-open');
+
+    expanded = { videoId, triggerRow, playerRow, instance: null, button };
+
+    try {
+      const instance = await window.HlsPlayer.init(mount, videoId);
+      // 展開中に別ボタンで畳まれていたら破棄して終了
+      if (!expanded || expanded.videoId !== videoId) {
+        instance.dispose();
+        return;
+      }
+      expanded.instance = instance;
+    } catch (err) {
+      mount.innerHTML = `<p class="status">再生できません: ${escapeHtml(err.message || String(err))}</p>`;
+    }
+  }
+
+  function collapseExpanded() {
+    if (!expanded) return;
+    if (expanded.instance) {
+      try { expanded.instance.dispose(); } catch (_) { /* ignore */ }
+    }
+    if (expanded.playerRow && expanded.playerRow.parentNode) {
+      expanded.playerRow.remove();
+    }
+    if (expanded.triggerRow) {
+      expanded.triggerRow.classList.remove('is-expanded');
+    }
+    if (expanded.button) {
+      expanded.button.textContent = '▶ 再生';
+      expanded.button.classList.remove('is-open');
+    }
+    expanded = null;
   }
 
   async function triggerConvert(filename, videoId, tr) {

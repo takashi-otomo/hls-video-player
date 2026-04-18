@@ -113,6 +113,29 @@ body {
 .btn-ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); }
 .btn-ghost:hover { color: var(--text); border-color: var(--accent); }
 .btn[disabled] { opacity: 0.6; cursor: not-allowed; }
+.btn-play.is-open { background: #2a2f39; color: var(--text); border-color: var(--accent); }
+
+/* 動画一覧に差し込まれるインラインプレイヤー行 */
+.sources-table tr.is-expanded td { border-bottom: none; }
+.sources-table tr.player-row td {
+  padding: 0;
+  background: #050709;
+  border-bottom: 1px solid var(--border);
+}
+.inline-player {
+  padding: 1rem;
+  animation: inline-player-in 0.18s ease-out;
+}
+.inline-player__mount {
+  max-width: 960px;
+  margin: 0 auto;
+}
+.inline-player .video-js { background: #000; border-radius: 6px; overflow: hidden; }
+
+@keyframes inline-player-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
 
 .video-list {
   list-style: none;
