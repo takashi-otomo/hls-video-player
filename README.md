@@ -102,7 +102,7 @@ MEDIA_ROOT=./media .venv/bin/python -m hls_video.cli media/source/movie.mp4
 2. **変換**: カード/行の「変換」ボタン → ステージ加重の進捗バーが表示される（解析中 → HLS変換中 → サムネイル生成中 → 変換済）
 3. **再生**: 「▶ 再生」ボタン → 16:9 の Video.js プレイヤーがロード、画質セレクタとシークバーサムネイルが使用可能
 
-## リソース制限（CPU / メモリ）
+## リソース制限 / 変換パフォーマンス
 
 `docker-compose.yml` の `deploy.resources.limits` と環境変数で 3 層の抑制:
 
@@ -111,15 +111,35 @@ MEDIA_ROOT=./media .venv/bin/python -m hls_video.cli media/source/movie.mp4
 | `APP_CPUS` | `2.0` | コンテナ最大 CPU |
 | `APP_MEMORY` | `2g` | コンテナ最大メモリ |
 | `MAX_CONCURRENT_JOBS` | `2` | 並列変換数 |
-| `FFMPEG_THREADS` | `2` | 各エンコーダのスレッド数 |
-| `FFMPEG_PRESET` | `veryfast` | libx264 プリセット |
+| `FFMPEG_THREADS` | `0` (auto) | 各エンコーダのスレッド数。0 = ffmpeg 自動 |
+| `FFMPEG_PRESET` | `ultrafast` | libx264 プリセット（CPU encode 時） |
+| `FFMPEG_HWACCEL` | `auto` | `auto` / `nvenc` / `cpu`。auto は NVENC 利用可能なら自動選択 |
+| `FFMPEG_NVENC_PRESET` | `p4` | h264_nvenc プリセット（`p1`=最速, `p7`=最高画質） |
+| `FFMPEG_VARIANTS` | *(空)* | `720p,360p` などでラダーを絞る。未指定は 4 本全部 |
 | `FFMPEG_NICE` | `10` | プロセス優先度（Unix 系のみ） |
 
-軽量化したい場合:
+### 変換速度の目安
+
+内部実装は `-filter_complex split=N` で **デコードを 1 回に抑え**、N 本のバリアントへ分岐します。
+加えて NVENC が使えれば CPU 比で桁違いに速くなります。
+
+| 環境 | 実時間あたり変換速度 |
+|---|---|
+| CPU (libx264, preset=ultrafast) | 1〜2x |
+| NVIDIA GPU (h264_nvenc, p4) | 10〜20x |
+
+### 軽量化プリセット
 
 ```bash
-FFMPEG_THREADS=1 FFMPEG_PRESET=ultrafast MAX_CONCURRENT_JOBS=1 APP_CPUS=1.0 docker compose up
+# CPU 優先 / 低解像度のみ
+FFMPEG_THREADS=1 FFMPEG_PRESET=ultrafast FFMPEG_VARIANTS=720p,360p \
+  MAX_CONCURRENT_JOBS=1 APP_CPUS=1.0 docker compose up
+
+# NVIDIA GPU（ローカル / Colab T4）: 既定で auto 検出。明示するなら
+FFMPEG_HWACCEL=nvenc FFMPEG_NVENC_PRESET=p4 ...
 ```
+
+Colab では **ランタイム > ランタイムのタイプを変更 > T4 GPU** を選ぶと NVENC が自動で有効になります。
 
 ## API
 

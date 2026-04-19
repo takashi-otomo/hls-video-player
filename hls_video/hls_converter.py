@@ -1,22 +1,38 @@
-"""MP4 → HLS (4 解像度 ABR) 変換。
+"""MP4 → HLS (ABR) 変換。
 
-Node 側 utils/hlsConverter.js と同等:
-- scale filter + pad + libx264 main profile
-- `-sc_threshold 0` + 固定 GOP でバリアント間キーフレーム整合
-- `-pix_fmt yuv420p` 強制（4:4:4 ソース対策）
-- `-preset` / `-threads` は CPU 抑制用の変数
+パフォーマンス最適化:
+- `-filter_complex split=N` で **デコードを 1 回に抑え**、N 本のバリアントへ分岐させる
+- `FFMPEG_HWACCEL=auto` なら NVENC (h264_nvenc) を自動選択。CPU 比で 10-30x 高速
+- `FFMPEG_VARIANTS="720p,360p"` でラダーを絞れる
+- `-threads 0` (auto) 既定
+
+品質設定:
+- CPU: `-preset <ultrafast|...>` + CRF
+- NVENC: `-preset p1..p7` + `-rc vbr -cq`
+- HLS の GOP/セグメント整合: `-g`/`-keyint_min` = segment_seconds × fps、`-sc_threshold 0`
 """
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
-from typing import Callable, Optional, TypedDict
+from typing import Callable, Literal, Optional, TypedDict
 
-from hls_video.config import ffmpeg_preset, ffmpeg_threads
+from hls_video.config import (
+    ffmpeg_hwaccel,
+    ffmpeg_nvenc_preset,
+    ffmpeg_path,
+    ffmpeg_preset,
+    ffmpeg_threads,
+    ffmpeg_variants_filter,
+)
 from hls_video.ffmpeg_runner import run_ffmpeg
+from hls_video.hwaccel import Backend, resolve_hwaccel
 from hls_video.master_playlist import build_master_playlist
 from hls_video.progress_parser import create_progress_parser
+
+logger = logging.getLogger(__name__)
 
 
 class Variant(TypedDict):
@@ -59,22 +75,38 @@ DEFAULT_VARIANTS: list[Variant] = [
 ]
 
 
-def build_variant_args(
+def _filter_complex_split(variants: list[Variant]) -> str:
+    """1 decode → N scale への split チェーンを組む。
+
+    `[0:v]split=N[v0][v1]...; [v0]scale=...[vo0]; [v1]scale=...[vo1]; ...`
+    """
+    n = len(variants)
+    labels = "".join(f"[v{i}]" for i in range(n))
+    parts = [f"[0:v]split={n}{labels}"]
+    for i, v in enumerate(variants):
+        parts.append(
+            f"[v{i}]scale=w=-2:h={v['height']}:"
+            f"force_original_aspect_ratio=decrease:force_divisible_by=2[vo{i}]"
+        )
+    return ";".join(parts)
+
+
+def _cpu_variant_output_args(
     variant: Variant,
     *,
     out_dir: str,
+    map_label: str,
     segment_seconds: int,
     gop: int,
     preset: str,
     threads: int,
 ) -> list[str]:
-    scale = (
-        f"scale=w=-2:h={variant['height']}:force_original_aspect_ratio=decrease:force_divisible_by=2"
-    )
+    """CPU (libx264) の 1 variant 分 -map + エンコーダ引数。"""
     playlist = os.path.join(out_dir, f"{variant['name']}.m3u8")
     seg_pattern = os.path.join(out_dir, f"{variant['name']}_%03d.ts")
     return [
-        "-vf", scale,
+        "-map", map_label,
+        "-map", "0:a:0?",
         "-c:a", "aac", "-ar", "48000", "-b:a", variant["audio_bitrate"],
         "-c:v", "h264", "-profile:v", "main",
         "-preset", preset,
@@ -83,14 +115,86 @@ def build_variant_args(
         "-pix_fmt", "yuv420p",
         "-sc_threshold", "0",
         "-g", str(gop), "-keyint_min", str(gop),
-        "-hls_time", str(segment_seconds),
-        "-hls_playlist_type", "vod",
         "-b:v", variant["video_bitrate"],
         "-maxrate", variant["maxrate"],
         "-bufsize", variant["bufsize"],
+        "-hls_time", str(segment_seconds),
+        "-hls_playlist_type", "vod",
         "-hls_segment_filename", seg_pattern,
         "-f", "hls", playlist,
     ]
+
+
+def _nvenc_variant_output_args(
+    variant: Variant,
+    *,
+    out_dir: str,
+    map_label: str,
+    segment_seconds: int,
+    gop: int,
+    preset: str,
+) -> list[str]:
+    """NVENC (h264_nvenc) の 1 variant 分。
+
+    NVENC は -crf ではなく -rc vbr + -cq で品質目標を指定する。libx264 の CRF を
+    近い体感画質にマップ: CRF そのまま CQ に使うと libx264 よりやや低画質側に寄るが、
+    HLS 配信品質としては十分許容範囲。
+    """
+    playlist = os.path.join(out_dir, f"{variant['name']}.m3u8")
+    seg_pattern = os.path.join(out_dir, f"{variant['name']}_%03d.ts")
+    return [
+        "-map", map_label,
+        "-map", "0:a:0?",
+        "-c:a", "aac", "-ar", "48000", "-b:a", variant["audio_bitrate"],
+        "-c:v", "h264_nvenc",
+        "-profile:v", "main",
+        "-preset", preset,
+        "-rc", "vbr",
+        "-cq", str(variant["crf"]),
+        "-b:v", variant["video_bitrate"],
+        "-maxrate", variant["maxrate"],
+        "-bufsize", variant["bufsize"],
+        "-pix_fmt", "yuv420p",
+        "-g", str(gop), "-keyint_min", str(gop),
+        "-hls_time", str(segment_seconds),
+        "-hls_playlist_type", "vod",
+        "-hls_segment_filename", seg_pattern,
+        "-f", "hls", playlist,
+    ]
+
+
+def build_ffmpeg_args(
+    *,
+    input_path: str,
+    output_dir: str,
+    variants: list[Variant],
+    segment_seconds: int,
+    gop: int,
+    backend: Backend,
+    preset: str,
+    threads: int,
+    nvenc_preset: str,
+) -> list[str]:
+    """フル ffmpeg 引数を組み立てる。
+
+    NVENC / CPU の分岐と filter_complex split をここに集約。テストはこの関数で。
+    """
+    filter_complex = _filter_complex_split(variants)
+    args: list[str] = ["-y", "-i", input_path, "-filter_complex", filter_complex]
+    for i, v in enumerate(variants):
+        label = f"[vo{i}]"
+        if backend == "nvenc":
+            args.extend(_nvenc_variant_output_args(
+                v, out_dir=output_dir, map_label=label,
+                segment_seconds=segment_seconds, gop=gop, preset=nvenc_preset,
+            ))
+        else:
+            args.extend(_cpu_variant_output_args(
+                v, out_dir=output_dir, map_label=label,
+                segment_seconds=segment_seconds, gop=gop,
+                preset=preset, threads=threads,
+            ))
+    return args
 
 
 def convert_mp4_to_hls(
@@ -104,23 +208,43 @@ def convert_mp4_to_hls(
     threads: Optional[int] = None,
     duration_seconds: Optional[float] = None,
     on_progress: Optional[Callable[[float, dict], None]] = None,
+    hwaccel: Optional[str] = None,
+    nvenc_preset: Optional[str] = None,
 ) -> dict:
-    variants = variants or DEFAULT_VARIANTS
+    selected = variants or DEFAULT_VARIANTS
+
+    # 環境変数で絞り込み
+    names_filter = ffmpeg_variants_filter()
+    if names_filter:
+        filtered = [v for v in selected if v["name"] in names_filter]
+        if filtered:
+            selected = filtered
+        else:
+            logger.warning(
+                "FFMPEG_VARIANTS=%s does not match any variant; using full ladder",
+                names_filter,
+            )
+
+    backend: Backend = resolve_hwaccel(hwaccel or ffmpeg_hwaccel(), ffmpeg_path())
     preset_ = preset or ffmpeg_preset()
+    nvenc_preset_ = nvenc_preset or ffmpeg_nvenc_preset()
     threads_ = threads if threads is not None else ffmpeg_threads()
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    # GOP を segment_seconds × fps の 2 倍に合わせる（Node 版と同じ算出）
     gop = max(2, round(segment_seconds * fps))
 
-    args = ["-y", "-i", input_path]
-    for v in variants:
-        args.extend(build_variant_args(
-            v, out_dir=str(out), segment_seconds=segment_seconds, gop=gop,
-            preset=preset_, threads=threads_,
-        ))
+    logger.info(
+        "HLS encode: backend=%s variants=%s preset=%s nvenc_preset=%s threads=%d gop=%d",
+        backend, [v["name"] for v in selected], preset_, nvenc_preset_, threads_, gop,
+    )
+
+    args = build_ffmpeg_args(
+        input_path=input_path, output_dir=str(out), variants=selected,
+        segment_seconds=segment_seconds, gop=gop, backend=backend,
+        preset=preset_, threads=threads_, nvenc_preset=nvenc_preset_,
+    )
 
     stderr_handler = (
         create_progress_parser(duration_seconds=duration_seconds, on_ratio=on_progress)
@@ -130,9 +254,14 @@ def convert_mp4_to_hls(
     run_ffmpeg(args, on_progress=stderr_handler, label=f"hls:{Path(output_dir).name}")
 
     master = build_master_playlist([
-        {"bandwidth": v["bandwidth"], "resolution": v["resolution"], "playlist": f"{v['name']}.m3u8"}
-        for v in variants
+        {"bandwidth": v["bandwidth"], "resolution": v["resolution"],
+         "playlist": f"{v['name']}.m3u8"}
+        for v in selected
     ])
     (out / "master.m3u8").write_text(master)
 
-    return {"master_path": str(out / "master.m3u8"), "variants": [v["name"] for v in variants]}
+    return {
+        "master_path": str(out / "master.m3u8"),
+        "variants": [v["name"] for v in selected],
+        "backend": backend,
+    }

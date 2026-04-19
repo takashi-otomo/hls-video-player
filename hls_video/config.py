@@ -24,11 +24,54 @@ def ffprobe_path() -> str:
 
 
 def ffmpeg_threads() -> int:
-    return max(1, int(os.environ.get("FFMPEG_THREADS", "2")))
+    """FFmpeg に渡す -threads 値。
+
+    0 は ffmpeg の "auto" = 物理コア数に合わせた最適化。
+    以前は 2 固定だったが、libx264/NVENC とも 0 (auto) が高速なので既定を 0 に変更。
+    負数は 0 へクリップ。
+    """
+    raw = os.environ.get("FFMPEG_THREADS", "0")
+    try:
+        v = int(raw)
+    except ValueError:
+        return 0
+    return max(0, v)
 
 
 def ffmpeg_preset() -> str:
-    return os.environ.get("FFMPEG_PRESET", "veryfast")
+    """libx264 用の preset（NVENC とは別物）。
+
+    CPU encode は preset が実行時間に大きく効くため既定を `ultrafast` に引き下げ。
+    HLS 配信用途では CRF で品質を担保するためサイズの微増よりも速度を優先する。
+    画質を優先したい場合は FFMPEG_PRESET=veryfast / fast などに上書き。
+    """
+    return os.environ.get("FFMPEG_PRESET", "ultrafast")
+
+
+def ffmpeg_nvenc_preset() -> str:
+    """NVENC (h264_nvenc) 用 preset。p1 (最速) .. p7 (最高画質)。
+
+    既定は `p4`（バランス）。エンコード速度を最大化したいなら p1/p2 に。
+    """
+    return os.environ.get("FFMPEG_NVENC_PRESET", "p4")
+
+
+def ffmpeg_hwaccel() -> str:
+    """FFMPEG_HWACCEL: "auto" (既定) / "nvenc" / "cpu"。
+
+    auto: h264_nvenc が ffmpeg に含まれていれば NVENC、無ければ CPU。
+    nvenc: 強制 NVENC（検出失敗でも NVENC パスを組む）。
+    cpu: 強制 libx264。
+    """
+    return os.environ.get("FFMPEG_HWACCEL", "auto").lower()
+
+
+def ffmpeg_variants_filter() -> list[str] | None:
+    """FFMPEG_VARIANTS="720p,360p" のように絞り込む。未指定なら全解像度。"""
+    raw = os.environ.get("FFMPEG_VARIANTS", "").strip()
+    if not raw:
+        return None
+    return [s.strip() for s in raw.split(",") if s.strip()]
 
 
 def ffmpeg_nice() -> int | None:
