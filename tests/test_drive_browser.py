@@ -9,6 +9,7 @@ from hls_video.drive_browser import (
     BrowseEntry,
     list_videos_under,
     import_file,
+    stage_to_local,
 )
 
 
@@ -180,3 +181,42 @@ class TestImportFile:
         dst = media / "source" / "movie.mp4"
         assert dst.is_file()
         assert dst.read_bytes() == b"new"
+
+
+class TestStageToLocal:
+    def test_copies_to_staging(self, tmp_path):
+        src = tmp_path / "drive" / "movie.mp4"
+        src.parent.mkdir()
+        src.write_bytes(b"DATA")
+        staging = tmp_path / "stage"
+
+        res = stage_to_local(str(src), str(staging))
+        assert res["ok"] is True
+        assert res["path"] == str(staging / "movie.mp4")
+        assert (staging / "movie.mp4").read_bytes() == b"DATA"
+        assert src.read_bytes() == b"DATA"  # 元は残る
+
+    def test_skips_copy_when_already_staged_with_same_size(self, tmp_path):
+        src = tmp_path / "drive" / "v.mp4"
+        src.parent.mkdir()
+        src.write_bytes(b"ABCDEF")
+        staging = tmp_path / "stage"
+        # 事前に同サイズの既存
+        staging.mkdir()
+        (staging / "v.mp4").write_bytes(b"QQQQQQ")  # 6 bytes like src
+
+        res = stage_to_local(str(src), str(staging))
+        assert res["ok"] is True
+        # skip されたので中身は古い値のまま
+        assert (staging / "v.mp4").read_bytes() == b"QQQQQQ"
+
+    def test_rejects_missing(self, tmp_path):
+        res = stage_to_local(str(tmp_path / "nope.mp4"), str(tmp_path / "stage"))
+        assert res["ok"] is False
+        assert res["path"] is None
+
+    def test_rejects_non_video_extension(self, tmp_path):
+        src = tmp_path / "doc.txt"
+        src.write_text("")
+        res = stage_to_local(str(src), str(tmp_path / "stage"))
+        assert res["ok"] is False

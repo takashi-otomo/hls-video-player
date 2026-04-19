@@ -11,9 +11,9 @@ from typing import Generator
 
 import gradio as gr
 
-from hls_video.config import max_concurrent_jobs, media_root
+from hls_video.config import max_concurrent_jobs, media_root, staging_dir
 from hls_video.conversion_runner import run_conversion
-from hls_video.drive_browser import import_file, list_videos_under
+from hls_video.drive_browser import import_file, list_videos_under, stage_to_local
 from hls_video.job_registry import Job, JobRegistry
 from hls_video.logging_setup import setup_logging
 from hls_video.source_catalog import (
@@ -62,10 +62,32 @@ _CSS = """
 
 def _load_sources(media_dir: Path, registry: JobRegistry) -> list[dict]:
     sources = list_sources(str(media_dir))
+    seen_vids: set[str] = set()
     for s in sources:
         active = registry.find_active_by_video_id(s["video_id"])
         s["active_job_id"] = active.id if active else None
-    return sources
+        seen_vids.add(s["video_id"])
+
+    # Drive ステージ経由の変換のように、source/ にも hls/ にもまだファイルが
+    # 存在しないが pending/running のジョブがある場合の行をここで合成。
+    # 変換開始ボタンを押した瞬間から UI に出るようにする。
+    for job in registry.list():
+        if job.state not in ("pending", "running"):
+            continue
+        if job.video_id in seen_vids:
+            continue
+        sources.append({
+            "filename": job.source_file or f"{job.video_id}.mp4",
+            "video_id": job.video_id,
+            "size_bytes": 0,
+            "modified_at": job.created_at or "",
+            "converted": False,
+            "sprite": None,
+            "source_deleted": True,   # ローカル実体なし扱い（サイズ欄に "—"）
+            "active_job_id": job.id,
+        })
+
+    return sorted(sources, key=lambda r: r["filename"])
 
 
 def _format_size(n: int) -> str:
@@ -178,8 +200,11 @@ def build_ui(
                     with gr.Tab("Drive / サーバから追加"):
                         gr.Markdown(
                             "指定したディレクトリ配下の `.mp4 / .mov / .mkv / .webm` を走査し、"
-                            "選んだファイルを `media/source/` に **コピー** して取り込みます。\n"
-                            "`重複` 列に ✓ が付く条件: **media/source/ に同名ファイルがある、または 対応する動画が変換済み**。"
+                            "選んだファイルを **ローカル (`/tmp`) にコピーしてそのまま変換** します。\n"
+                            "- `media/source/` にはコピーしません（Drive への 2 重書き込みを回避）\n"
+                            "- 変換先は `media/hls/`, `media/sprites/`（Drive 配下）\n"
+                            "- 変換完了 / 失敗どちらでもステージングのローカルコピーは自動削除\n"
+                            "`重複` 列に ✓: **対応する動画が既に変換済み、または `media/source/` に同名ファイルあり**。"
                         )
                         with gr.Row():
                             browse_path = gr.Textbox(
@@ -205,10 +230,7 @@ def build_ui(
                         selected_path_state = gr.State(None)   # 選択行の絶対パス
                         selected_label = gr.Markdown(visible=False)
                         with gr.Row():
-                            import_btn = gr.Button("＋ 追加（コピー）", variant="primary")
-                            import_overwrite = gr.Checkbox(
-                                value=False, label="同名ファイルを上書き",
-                            )
+                            convert_btn = gr.Button("🎬 変換開始 (ローカルにコピーして変換)", variant="primary")
                         browse_msg = gr.Markdown(visible=False)
                     with gr.Tab("PC からアップロード"):
                         gr.Markdown(
@@ -361,26 +383,78 @@ def build_ui(
             outputs=[selected_path_state, selected_label],
         )
 
-        def _on_import(src_path, overwrite: bool):
+        def _on_convert_from_drive(src_path):
+            """行選択 → ローカルにステージ → 変換投入。
+
+            `media/source/` には一切触れない。ステージングは /tmp（Colab ローカル）。
+            """
             if not src_path:
                 return (
                     gr.update(value="⚠️ 行を選択してから押してください", visible=True),
                     _load_sources(media_dir, registry),
                     gr.update(active=False),
                 )
-            res = import_file(src_path, str(media_dir), overwrite=overwrite)
+            from pathlib import Path as _P
+            src = _P(src_path)
+            vid = resolve_video_id(src.name)
+
+            # 既に変換済み / アクティブジョブありならここで弾く
+            if registry.find_active_by_video_id(vid):
+                return (
+                    gr.update(value=f"⚠️ {src.name} は既に変換キューに入っています", visible=True),
+                    _load_sources(media_dir, registry),
+                    gr.update(active=True),
+                )
+            if (media_dir / "hls" / vid / "master.m3u8").exists():
+                return (
+                    gr.update(value=f"⚠️ {src.name} は既に変換済みです（動画一覧の 🗑 で削除してから再変換可能）", visible=True),
+                    _load_sources(media_dir, registry),
+                    gr.update(active=False),
+                )
+
+            # 1) Drive → Colab ローカルへコピー
+            stage_res = stage_to_local(src_path, str(staging_dir()))
+            if not stage_res["ok"]:
+                return (
+                    gr.update(value=f"⚠️ {stage_res['message']}", visible=True),
+                    _load_sources(media_dir, registry),
+                    gr.update(active=False),
+                )
+            staged_path = stage_res["path"]
+
+            # 2) 変換ジョブ投入（source_path にローカル staged を渡す）
+            try:
+                registry.submit(
+                    runner=lambda reg, job_id, _sp=staged_path, _name=src.name, _vid=vid: run_conversion(
+                        registry=reg, job_id=job_id,
+                        media_root=str(media_dir),
+                        source_file=_name, video_id=_vid,
+                        source_path=_sp,
+                        cleanup_source_after=True,
+                    ),
+                    video_id=vid,
+                    source_file=src.name,
+                )
+            except ValueError as e:
+                return (
+                    gr.update(value=f"⚠️ ジョブ投入失敗: {e}", visible=True),
+                    _load_sources(media_dir, registry),
+                    gr.update(active=False),
+                )
+
             sources = _load_sources(media_dir, registry)
-            any_active = any(s.get("active_job_id") for s in sources)
-            icon = "✅" if res["ok"] else "⚠️"
             return (
-                gr.update(value=f"{icon} {res['message']}", visible=True),
+                gr.update(
+                    value=f"✅ {src.name}: {stage_res['message']} → 変換を開始しました。動画一覧で進捗を確認できます。",
+                    visible=True,
+                ),
                 sources,
-                gr.update(active=any_active),
+                gr.update(active=True),
             )
 
-        import_btn.click(
-            _on_import,
-            inputs=[selected_path_state, import_overwrite],
+        convert_btn.click(
+            _on_convert_from_drive,
+            inputs=selected_path_state,
             outputs=[browse_msg, sources_state, poll_timer],
         )
 

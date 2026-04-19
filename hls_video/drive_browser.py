@@ -12,11 +12,15 @@ Colab + Drive mount 環境では、ユーザーの動画は既に `/content/driv
 
 from __future__ import annotations
 
+import logging
 import shutil
+import time
 from pathlib import Path
 from typing import NamedTuple
 
 from hls_video.source_catalog import VIDEO_EXTS, resolve_video_id
+
+logger = logging.getLogger(__name__)
 
 
 class BrowseEntry(NamedTuple):
@@ -153,3 +157,49 @@ def import_file(src_path: str, media_root: str, *, overwrite: bool = False) -> d
 
 # 後方互換のために旧名を残すが、新規コードは import_file を使うこと
 import_as_symlink = import_file
+
+
+def stage_to_local(src_path: str, staging_dir: str) -> dict:
+    """Drive 上の動画ファイルを Colab ローカル SSD (ステージング領域) にコピーする。
+
+    Drive FUSE は sequential read が遅いので、ffmpeg に渡す前に一度ローカルへ
+    コピーしてから変換する。戻り値の `path` を run_conversion(source_path=...) に渡す。
+
+    戻り値 dict:
+      - ok (bool)
+      - message (str)
+      - path (str | None)  ステージ後のローカル絶対パス
+      - filename (str | None)
+    """
+    src = Path(src_path)
+    if not src.is_file():
+        return {"ok": False, "message": f"ファイルが見つかりません: {src_path}",
+                "path": None, "filename": None}
+    if src.suffix.lower() not in VIDEO_EXTS:
+        return {
+            "ok": False,
+            "message": f"対応外の拡張子です（{', '.join(sorted(VIDEO_EXTS))}）",
+            "path": None, "filename": None,
+        }
+
+    out_dir = Path(staging_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dst = out_dir / src.name
+    size_mb = src.stat().st_size / (1024 * 1024)
+
+    logger.info("staging %.1f MB: %s -> %s", size_mb, src, dst)
+    t0 = time.monotonic()
+    # 既に同じサイズで存在するなら再コピー省略（再試行時の時短）
+    if dst.exists() and dst.stat().st_size == src.stat().st_size:
+        logger.info("staging skipped (already present): %s", dst)
+    else:
+        shutil.copy2(str(src), str(dst))
+    elapsed = time.monotonic() - t0
+    if elapsed > 0:
+        logger.info("staging done in %.1fs (%.1f MB/s)", elapsed, size_mb / max(elapsed, 0.001))
+    return {
+        "ok": True,
+        "message": f"{src.name} を {out_dir} にコピー ({elapsed:.1f}s)",
+        "path": str(dst),
+        "filename": src.name,
+    }

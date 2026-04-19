@@ -35,8 +35,22 @@ def run_conversion(
     media_root: str,
     source_file: str,
     video_id: str,
+    source_path: str | None = None,
+    cleanup_source_after: bool = False,
 ) -> None:
-    input_path = Path(media_root) / "source" / source_file
+    """変換ジョブ本体。
+
+    - `source_file` は表示用（Job.source_file や UI ログ用）
+    - `source_path` を明示した場合はそちらを ffmpeg 入力に使う（Colab のステージング
+      対応）。省略時は従来通り `{media_root}/source/{source_file}` を参照。
+    - `cleanup_source_after=True` のとき、成功時・失敗時のどちらも入力ファイルを
+      unlink する（ステージングで /tmp に置いた一時ファイル向け）。
+      成功時のみ消す等の細かい制御が必要なら別途フラグを用意すること。
+    """
+    if source_path:
+        input_path = Path(source_path)
+    else:
+        input_path = Path(media_root) / "source" / source_file
     hls_dir = Path(media_root) / "hls" / video_id
     sprites_dir = Path(media_root) / "sprites"
 
@@ -179,3 +193,11 @@ def run_conversion(
         registry.update(job_id, state="failed", error=str(err)[:500])
         if hls_dir.exists() and not (hls_dir / "master.m3u8").exists():
             shutil.rmtree(hls_dir, ignore_errors=True)
+    finally:
+        # ステージング領域の一時ファイルは成否にかかわらず掃除
+        if cleanup_source_after and source_path:
+            try:
+                Path(source_path).unlink(missing_ok=True)
+                logger.info("[%s] staged source cleaned up: %s", video_id, source_path)
+            except OSError as e:
+                logger.warning("[%s] staging cleanup failed: %s", video_id, e)

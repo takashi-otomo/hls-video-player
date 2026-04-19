@@ -90,3 +90,71 @@ def test_run_conversion_fails_fast_when_source_missing(tmp_path):
     final = reg.get(job.id)
     assert final.state == "failed"
     assert "not found" in final.error.lower()
+
+
+def test_run_conversion_uses_source_path_and_cleans_up(tmp_path, monkeypatch):
+    """source_path 指定時: ffmpeg 入力にそれを使い、cleanup_source_after で削除。"""
+    reg = JobRegistry(max_workers=1)
+    job = reg.create(video_id="staged", source_file="staged.mp4")
+
+    # ステージングのローカルファイル（media_root/source/ ではない場所）
+    staged = tmp_path / "stage" / "staged.mp4"
+    staged.parent.mkdir()
+    staged.write_bytes(b"STAGED")
+
+    import hls_video.conversion_runner as runner_mod
+    captured = {}
+
+    def fake_probe(p):
+        captured["probe_path"] = p
+        return 10.0
+
+    def fake_convert(**kw):
+        captured["hls_input"] = kw.get("input_path")
+
+    def fake_sprite(**kw):
+        captured["sprite_input"] = kw.get("input_path")
+
+    monkeypatch.setattr(runner_mod, "probe_duration_seconds", fake_probe)
+    monkeypatch.setattr(runner_mod, "convert_mp4_to_hls", fake_convert)
+    monkeypatch.setattr(runner_mod, "generate_sprite", fake_sprite)
+
+    run_conversion(
+        registry=reg, job_id=job.id,
+        media_root=str(tmp_path),
+        source_file="staged.mp4",
+        video_id="staged",
+        source_path=str(staged),
+        cleanup_source_after=True,
+    )
+
+    assert reg.get(job.id).state == "completed"
+    assert captured["probe_path"] == str(staged)
+    assert captured["hls_input"] == str(staged)
+    assert captured["sprite_input"] == str(staged)
+    # ステージングファイルが消えていること
+    assert not staged.exists()
+
+
+def test_run_conversion_keeps_source_by_default(tmp_path, monkeypatch):
+    """cleanup_source_after=False のときはステージを消さない。"""
+    reg = JobRegistry(max_workers=1)
+    job = reg.create(video_id="keep", source_file="keep.mp4")
+
+    staged = tmp_path / "stage" / "keep.mp4"
+    staged.parent.mkdir()
+    staged.write_bytes(b"X")
+
+    import hls_video.conversion_runner as runner_mod
+    monkeypatch.setattr(runner_mod, "probe_duration_seconds", lambda p: 1.0)
+    monkeypatch.setattr(runner_mod, "convert_mp4_to_hls", lambda **_k: None)
+    monkeypatch.setattr(runner_mod, "generate_sprite", lambda **_k: None)
+
+    run_conversion(
+        registry=reg, job_id=job.id,
+        media_root=str(tmp_path),
+        source_file="keep.mp4",
+        video_id="keep",
+        source_path=str(staged),
+    )
+    assert staged.exists()

@@ -45,3 +45,12 @@ def ffmpeg_nice() -> int | None:
 def max_concurrent_jobs() -> int:
     """同時変換ジョブ数の上限。既定 2、最低 1。"""
     return max(1, int(os.environ.get("MAX_CONCURRENT_JOBS", "2")))
+
+
+def staging_dir() -> Path:
+    """Drive からコピーしてきたソース MP4 を一時的に置く場所。
+
+    Colab では /tmp (Colab ローカル SSD) が Drive FUSE より圧倒的に速いので、
+    変換直前にここへコピーして ffmpeg に読ませる。変換完了後は自動削除。
+    """
+    return Path(os.environ.get("STAGING_DIR", "/tmp/hls-staging"))
