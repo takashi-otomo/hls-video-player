@@ -143,38 +143,43 @@ MIME:
 ## Google Colab で動かす
 
 `colab_launch.ipynb` を Colab で開き、上から順に実行するだけで起動します。
+**コードベースは Git ではなく Google Drive に置いたコピーから取得**、メディアも Drive に永続化します。
 
-### セル構成
+### 事前準備（初回のみ）
 
-1. **FFmpeg インストール**: `!apt-get -qq install -y ffmpeg`
-2. **Python 依存**: `!pip install -q gradio fastapi uvicorn python-multipart`
-3. **Drive マウント**: `drive.mount('/content/drive')`
-4. **リポジトリ取得**: `git clone` → `pip install -e .`
-5. **環境変数設定**:
-   ```python
-   os.environ['MEDIA_ROOT'] = '/content/drive/MyDrive/hls-video/media'
-   os.environ['MAX_CONCURRENT_JOBS'] = '1'   # Colab は 2 vCPU が多いので 1
-   os.environ['FFMPEG_PRESET'] = 'veryfast'
-   os.environ['GRADIO_SHARE'] = 'true'
-   ```
-6. **起動**: FastAPI + Gradio を同一プロセスで上げる。`share=True` で外部公開 URL が発行され、`/hls/*` `/sprites/*` も同じトンネル経由で配信されます。
-
-### ディレクトリレイアウト
+Google Drive に次のレイアウトでコードを配置:
 
 ```
-/content/drive/MyDrive/hls-video/
-└── media/
-    ├── source/   ← ユーザーがアップロードする MP4 原本（永続）
-    ├── hls/      ← 変換出力（永続、再生成可能）
-    └── sprites/  ← スプライト + VTT（永続、再生成可能）
+MyDrive/
+└── hls-video-player/
+    ├── pyproject.toml
+    ├── app/
+    ├── hls_video/
+    ├── static/
+    └── media/
+        ├── source/   ← 変換元 MP4 を置く（永続）
+        ├── hls/      ← 変換出力（永続、再生成可能）
+        └── sprites/  ← スプライト + VTT（永続、再生成可能）
 ```
 
-Colab ランタイム切断後も Drive 配下は残るので、再接続後ノートを再実行すれば一覧/再生がそのまま復帰します。
+手元の `hls-video-player/` ディレクトリをそのまま Drive にアップロードすれば OK。`.git/`、`.venv/`、`node_modules/`、`__pycache__/` は不要（ノート側で除外コピー）。
+
+### 実行フロー
+
+1. **FFmpeg + Python 依存**: `apt install ffmpeg` / `pip install gradio fastapi uvicorn python-multipart`
+2. **Drive マウント**: `drive.mount('/content/drive')`
+3. **Drive → Colab ローカル複製**: `/content/drive/MyDrive/hls-video-player` → `/content/hls-video-player`（メディアは除外）→ `pip install -e .`
+4. **`MEDIA_ROOT` 設定**: `/content/drive/MyDrive/hls-video-player/media` を指す
+5. **起動**: FastAPI + Gradio を同一プロセスで立ち上げ、`share=True` で `*.gradio.live` の公開 URL を発行
+
+### コード更新時
+
+手元で編集 → Drive に上書き同期 → Colab でノートを先頭から再実行。セル 3 が Drive から毎回コピーし直すので、古いコードは上書きされます。
 
 ### Colab 固有の注意
 
-- **Drive I/O は遅い**: ローカル VM より変換時間が 1.5〜2 倍程度伸びる傾向。長尺動画は特に
-- **VM タイムアウト**: 無償枠は 12 時間、アイドル 90 分で切断。進行中ジョブは途中で停止しうるため、大きな動画は一度に 1 本ずつがおすすめ
+- **Drive I/O が遅い**: media の入出力は Drive を経由するので、ローカル VM より変換時間が 1.5〜2 倍程度伸びる傾向。コードは Colab ローカルにコピーして使うことで import / reload は高速
+- **VM タイムアウト**: 無償枠は 12 時間、アイドル 90 分で切断。進行中ジョブは途中で停止しうるため、大きな動画は一度に 1 本ずつ
 - **share URL は一時的**: セッション切断と同時に無効化。業務利用には向かない
 
 ## 開発ルール
