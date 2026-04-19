@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import html
+import os
 import shutil
 from pathlib import Path
 from typing import Generator
@@ -12,10 +13,19 @@ import gradio as gr
 
 from hls_video.config import max_concurrent_jobs, media_root
 from hls_video.conversion_runner import run_conversion
+from hls_video.drive_browser import import_as_symlink, list_videos_under
 from hls_video.job_registry import Job, JobRegistry
 from hls_video.source_catalog import list_sources, resolve_video_id, VIDEO_EXTS
 
 from app.player_embed import empty_html, iframe_html
+
+
+# Drive ブラウズ UI のデフォルトパス。Colab 上では /content/drive/MyDrive を、
+# ローカルでは環境変数 DRIVE_BROWSE_ROOT か ./media/source を使う。
+_DEFAULT_BROWSE_ROOT = os.environ.get(
+    "DRIVE_BROWSE_ROOT",
+    "/content/drive/MyDrive" if os.path.isdir("/content/drive/MyDrive") else "./",
+)
 
 
 # カードサムネイルと進捗表示用。Gradio のテーマと共存させるため名前空間を切る。
@@ -137,13 +147,43 @@ def build_ui(
         view_mode_state = gr.State("card")
         playing_state = gr.State(None)  # video_id | None
 
+        # --- 動画の追加エリア (Drive browse + ローカルアップロード) ---
         with gr.Row():
-            upload = gr.File(
-                label="動画を追加（.mp4 / .mov / .mkv / .webm）",
-                file_types=[f"*{ext}" for ext in VIDEO_EXTS],
-                type="filepath",
-                scale=3,
-            )
+            with gr.Column(scale=3):
+                with gr.Tabs():
+                    with gr.Tab("Drive / サーバから追加"):
+                        gr.Markdown(
+                            "指定したディレクトリ配下の `.mp4 / .mov / .mkv / .webm` を走査し、"
+                            "選んだファイルを `media/source/` に **シンボリックリンク** として取り込みます "
+                            "（ファイル本体はコピーせず、元の場所に置いたまま参照）。"
+                        )
+                        with gr.Row():
+                            browse_path = gr.Textbox(
+                                value=_DEFAULT_BROWSE_ROOT,
+                                label="走査するディレクトリパス",
+                                scale=4,
+                            )
+                            scan_btn = gr.Button("🔍 走査", scale=1)
+                        file_picker = gr.Dropdown(
+                            choices=[], label="見つかった動画ファイル", interactive=True,
+                        )
+                        with gr.Row():
+                            import_btn = gr.Button("＋ 追加（リンク）", variant="primary")
+                            import_overwrite = gr.Checkbox(
+                                value=False, label="同名ファイルを上書き",
+                            )
+                        browse_msg = gr.Markdown(visible=False)
+                    with gr.Tab("PC からアップロード"):
+                        gr.Markdown(
+                            "_PC 上のファイルを直接 Colab へアップロードします。Drive 上にあるものは "
+                            "「Drive / サーバから追加」のタブを使った方が通信量を節約できます。_"
+                        )
+                        upload = gr.File(
+                            label="動画を追加（.mp4 / .mov / .mkv / .webm）",
+                            file_types=[f"*{ext}" for ext in VIDEO_EXTS],
+                            type="filepath",
+                        )
+                        upload_msg = gr.Markdown(visible=False)
             with gr.Column(scale=1, min_width=160):
                 view_mode = gr.Radio(
                     choices=[("▦ カード", "card"), ("≡ リスト", "list")],
@@ -152,7 +192,6 @@ def build_ui(
                     container=False,
                 )
                 refresh_btn = gr.Button("↻ 更新", size="sm")
-        upload_msg = gr.Markdown(visible=False)
 
         # プレイヤー領域
         player_area = gr.HTML(value=empty_html(), label="プレイヤー")
@@ -196,6 +235,49 @@ def build_ui(
             return gr.update(value=msg, visible=True), sources, gr.update(active=any_active)
 
         upload.change(_on_upload, inputs=upload, outputs=[upload_msg, sources_state, poll_timer])
+
+        # --- Drive ブラウズ ---
+
+        def _on_scan(path: str):
+            if not path:
+                return gr.update(choices=[], value=None), gr.update(
+                    value="_パスを入力してください_", visible=True
+                )
+            entries = list_videos_under(path)
+            if not entries:
+                return gr.update(choices=[], value=None), gr.update(
+                    value=f"`{path}` の下に動画が見つかりませんでした。", visible=True
+                )
+            # (表示ラベル, 値=絶対パス) のタプルで Dropdown を生成
+            choices = [
+                (f"{e.rel}  ({_format_size(e.size_bytes)})", e.path) for e in entries
+            ]
+            return gr.update(choices=choices, value=choices[0][1]), gr.update(
+                value=f"**{len(entries)}** 件見つかりました。追加したいものを選択してください。",
+                visible=True,
+            )
+
+        scan_btn.click(_on_scan, inputs=browse_path, outputs=[file_picker, browse_msg])
+
+        def _on_import(src_path: str, overwrite: bool):
+            if not src_path:
+                return gr.update(value="ファイルを選択してください", visible=True), \
+                       _load_sources(media_dir, registry), gr.update(active=False)
+            res = import_as_symlink(src_path, str(media_dir), overwrite=overwrite)
+            sources = _load_sources(media_dir, registry)
+            any_active = any(s.get("active_job_id") for s in sources)
+            icon = "✅" if res["ok"] else "⚠️"
+            return (
+                gr.update(value=f"{icon} {res['message']}", visible=True),
+                sources,
+                gr.update(active=any_active),
+            )
+
+        import_btn.click(
+            _on_import,
+            inputs=[file_picker, import_overwrite],
+            outputs=[browse_msg, sources_state, poll_timer],
+        )
 
     return demo
 
