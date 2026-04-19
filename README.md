@@ -168,9 +168,10 @@ MyDrive/
 
 1. **FFmpeg + Python 依存**: `apt install ffmpeg` / `pip install gradio fastapi uvicorn python-multipart`
 2. **Drive マウント**: `drive.mount('/content/drive')`
-3. **Drive → Colab ローカル複製**: `/content/drive/MyDrive/hls-video-player` → `/content/hls-video-player`（メディアは除外）→ `pip install -e .`
-4. **`MEDIA_ROOT` 設定**: `/content/drive/MyDrive/hls-video-player/media` を指す
-5. **起動**: FastAPI + Gradio を同一プロセスで立ち上げ、`share=True` で `*.gradio.live` の公開 URL を発行
+3. **Google Drive からコードベースをコピー**: `/content/drive/MyDrive/hls-video-player` → `/content/hls-video-player`（`media/`, `.git`, `__pycache__`, `.venv` 等は除外）
+4. **Python パッケージとしてインストール**: `pip install -e .`
+5. **`MEDIA_ROOT` 設定**: `/content/drive/MyDrive/hls-video-player/media` を指す（Drive 実体を直接使用）
+6. **起動**: FastAPI + Gradio を同一プロセスで立ち上げ、`share=True` で `*.gradio.live` の公開 URL を発行
 
 ### コード更新時
 
