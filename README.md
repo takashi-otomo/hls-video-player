@@ -114,19 +114,22 @@ MEDIA_ROOT=./media .venv/bin/python -m hls_video.cli media/source/movie.mp4
 | `FFMPEG_THREADS` | `0` (auto) | 各エンコーダのスレッド数。0 = ffmpeg 自動 |
 | `FFMPEG_PRESET` | `ultrafast` | libx264 プリセット（CPU encode 時） |
 | `FFMPEG_HWACCEL` | `auto` | `auto` / `nvenc` / `cpu`。auto は NVENC 利用可能なら自動選択 |
+| `FFMPEG_CUVID` | `auto` | `auto` / `on` / `off`。NVENC 時に GPU decode (CUVID) も使うか |
 | `FFMPEG_NVENC_PRESET` | `p4` | h264_nvenc プリセット（`p1`=最速, `p7`=最高画質） |
+| `FFMPEG_BFRAMES` | `0` | NVENC の -bf 値。0 で B-frames 無効化（速度優先） |
 | `FFMPEG_VARIANTS` | *(空)* | `720p,360p` などでラダーを絞る。未指定は 4 本全部 |
 | `FFMPEG_NICE` | `10` | プロセス優先度（Unix 系のみ） |
 
 ### 変換速度の目安
 
 内部実装は `-filter_complex split=N` で **デコードを 1 回に抑え**、N 本のバリアントへ分岐します。
-加えて NVENC が使えれば CPU 比で桁違いに速くなります。
+NVENC + CUVID の組合せで decode / scale / encode を全て GPU 上で完結させ、メモリコピーを排します。
 
 | 環境 | 実時間あたり変換速度 |
 |---|---|
 | CPU (libx264, preset=ultrafast) | 1〜2x |
-| NVIDIA GPU (h264_nvenc, p4) | 10〜20x |
+| NVIDIA GPU + CPU decode (h264_nvenc, p4, bf=0) | 3〜5x |
+| NVIDIA GPU + CUVID (+ `scale_cuda`) | **5〜10x** |
 
 ### 軽量化プリセット
 

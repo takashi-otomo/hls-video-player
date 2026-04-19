@@ -15,6 +15,8 @@ def _clean_env(monkeypatch):
         "FFMPEG_PRESET",
         "FFMPEG_NVENC_PRESET",
         "FFMPEG_HWACCEL",
+        "FFMPEG_CUVID",
+        "FFMPEG_BFRAMES",
         "FFMPEG_VARIANTS",
         "FFMPEG_NICE",
         "MAX_CONCURRENT_JOBS",
@@ -63,6 +65,34 @@ def test_ffmpeg_threads_invalid_returns_zero(monkeypatch):
 def test_ffmpeg_hwaccel_case_insensitive(monkeypatch):
     monkeypatch.setenv("FFMPEG_HWACCEL", "NVENC")
     assert config.ffmpeg_hwaccel() == "nvenc"
+
+
+def test_ffmpeg_cuvid_default_auto():
+    assert config.ffmpeg_cuvid() == "auto"
+
+
+def test_ffmpeg_cuvid_lowercased(monkeypatch):
+    monkeypatch.setenv("FFMPEG_CUVID", "ON")
+    assert config.ffmpeg_cuvid() == "on"
+
+
+def test_ffmpeg_bframes_default_zero():
+    assert config.ffmpeg_bframes() == 0
+
+
+def test_ffmpeg_bframes_env_override(monkeypatch):
+    monkeypatch.setenv("FFMPEG_BFRAMES", "3")
+    assert config.ffmpeg_bframes() == 3
+
+
+def test_ffmpeg_bframes_invalid_returns_zero(monkeypatch):
+    monkeypatch.setenv("FFMPEG_BFRAMES", "abc")
+    assert config.ffmpeg_bframes() == 0
+
+
+def test_ffmpeg_bframes_negative_clamped(monkeypatch):
+    monkeypatch.setenv("FFMPEG_BFRAMES", "-2")
+    assert config.ffmpeg_bframes() == 0
 
 
 def test_ffmpeg_variants_filter_splits_csv(monkeypatch):

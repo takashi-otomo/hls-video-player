@@ -105,18 +105,16 @@ class TestBuildFfmpegArgsNVENC:
     def test_uses_h264_nvenc_encoder(self):
         args = self._args()
         cv = _find_all(args, "-c:v")
+        # CUVID 未使用時は c:v が4個（各 variant の encoder 指定のみ）
         assert len(cv) == 4
         for i in cv:
             assert args[i + 1] == "h264_nvenc"
 
     def test_uses_vbr_cq_instead_of_crf(self):
         args = self._args()
-        # -crf は使わない
         assert "-crf" not in args
-        # -rc vbr が出る
         rc = [args[i + 1] for i in _find_all(args, "-rc")]
         assert rc == ["vbr"] * 4
-        # -cq は各 variant の crf 値に対応
         cq = [args[i + 1] for i in _find_all(args, "-cq")]
         assert cq == [str(v["crf"]) for v in DEFAULT_VARIANTS]
 
@@ -126,7 +124,6 @@ class TestBuildFfmpegArgsNVENC:
         assert presets == ["p1"] * 4
 
     def test_no_threads_flag_on_nvenc(self):
-        # NVENC は GPU 任せなので -threads は付けない
         args = self._args()
         assert "-threads" not in args
 
@@ -134,6 +131,80 @@ class TestBuildFfmpegArgsNVENC:
         args = self._args()
         fc = args[args.index("-filter_complex") + 1]
         assert "split=4" in fc
+
+    def test_default_bframes_zero(self):
+        args = self._args()
+        bf = [args[i + 1] for i in _find_all(args, "-bf")]
+        assert bf == ["0"] * 4
+
+    def test_bframes_propagates_to_all_variants(self):
+        args = self._args(bframes=3)
+        bf = [args[i + 1] for i in _find_all(args, "-bf")]
+        assert bf == ["3"] * 4
+
+
+class TestBuildFfmpegArgsNVENCWithCuvid:
+    """CUVID (GPU decode) + NVENC (GPU encode) の組み合わせ。"""
+
+    def _args(self, **overrides):
+        kw = dict(
+            input_path="/tmp/in.mp4",
+            output_dir="/out",
+            variants=DEFAULT_VARIANTS,
+            segment_seconds=4,
+            gop=48,
+            backend="nvenc",
+            preset="ultrafast",
+            threads=0,
+            nvenc_preset="p4",
+            cuvid_decoder="h264_cuvid",
+        )
+        kw.update(overrides)
+        return build_ffmpeg_args(**kw)
+
+    def test_hwaccel_cuda_prepended_before_input(self):
+        args = self._args()
+        # -hwaccel cuda / -hwaccel_output_format cuda が -i より前に出現
+        i_idx = args.index("-i")
+        hwaccel_idx = args.index("-hwaccel")
+        fmt_idx = args.index("-hwaccel_output_format")
+        assert hwaccel_idx < i_idx
+        assert fmt_idx < i_idx
+        assert args[hwaccel_idx + 1] == "cuda"
+        assert args[fmt_idx + 1] == "cuda"
+
+    def test_input_decoder_set_to_cuvid(self):
+        args = self._args(cuvid_decoder="hevc_cuvid")
+        # -i の前に現れる -c:v が CUVID decoder 指定
+        i_idx = args.index("-i")
+        # その前の範囲で -c:v を探す
+        pre_input = args[:i_idx]
+        cv_idx = pre_input.index("-c:v")
+        assert pre_input[cv_idx + 1] == "hevc_cuvid"
+
+    def test_filter_complex_uses_scale_cuda(self):
+        args = self._args()
+        fc = args[args.index("-filter_complex") + 1]
+        assert "scale_cuda=" in fc
+        # ただの scale= は出てこない（scale_cuda は含むので word boundary で）
+        # "scale=" がどこかにあっても scale_cuda 以外として出てはいけない
+        # → 安全側: 少なくとも 4 回 scale_cuda が出る
+        assert fc.count("scale_cuda=") == 4
+
+    def test_cuvid_off_when_not_specified(self):
+        args = self._args(cuvid_decoder=None)
+        # CUVID なし → hwaccel を追加しない
+        assert "-hwaccel" not in args
+        fc = args[args.index("-filter_complex") + 1]
+        assert "scale_cuda" not in fc
+
+    def test_cuvid_ignored_on_cpu_backend(self):
+        """CPU backend のときは cuvid_decoder が指定されても無視する。"""
+        args = self._args(backend="cpu", cuvid_decoder="h264_cuvid")
+        assert "-hwaccel" not in args
+        fc = args[args.index("-filter_complex") + 1]
+        assert "scale_cuda" not in fc
+        assert "scale=" in fc
 
 
 class TestPortraitScaling:

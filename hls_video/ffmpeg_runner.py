@@ -166,20 +166,21 @@ def probe_duration_seconds(
     return float(data.get("format", {}).get("duration", 0) or 0)
 
 
-def probe_video_dimensions(
+def probe_video_stream(
     input_path: str,
     *,
     ffprobe_path: Optional[str] = None,
-) -> tuple[int, int]:
-    """1 本目の video stream の (width, height) を返す。取得失敗時は (0, 0)。
+) -> dict:
+    """1 本目の video stream の基本情報を dict で返す。
 
-    縦動画判定（orientation-aware scaling）で利用する。
+    キー: width (int), height (int), codec_name (str)。取得失敗時は 0/"" を埋めて返す。
+    orientation-aware scaling と CUVID decoder 選択の両方で使う。
     """
     data = run_ffprobe_json(
         [
             "-v", "error",
             "-select_streams", "v:0",
-            "-show_entries", "stream=width,height",
+            "-show_entries", "stream=width,height,codec_name",
             "-of", "json",
             input_path,
         ],
@@ -188,12 +189,24 @@ def probe_video_dimensions(
     )
     streams = data.get("streams", [])
     if not streams:
-        return 0, 0
+        return {"width": 0, "height": 0, "codec_name": ""}
     s = streams[0]
     try:
-        return int(s.get("width", 0) or 0), int(s.get("height", 0) or 0)
+        w = int(s.get("width", 0) or 0)
+        h = int(s.get("height", 0) or 0)
     except (TypeError, ValueError):
-        return 0, 0
+        w, h = 0, 0
+    return {"width": w, "height": h, "codec_name": str(s.get("codec_name") or "")}
+
+
+def probe_video_dimensions(
+    input_path: str,
+    *,
+    ffprobe_path: Optional[str] = None,
+) -> tuple[int, int]:
+    """後方互換: (width, height) タプルで返す薄いラッパ。"""
+    s = probe_video_stream(input_path, ffprobe_path=ffprobe_path)
+    return s["width"], s["height"]
 
 
 def _default_ffmpeg() -> str:

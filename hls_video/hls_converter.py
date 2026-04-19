@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Callable, Literal, Optional, TypedDict
 
 from hls_video.config import (
+    ffmpeg_bframes,
+    ffmpeg_cuvid,
     ffmpeg_hwaccel,
     ffmpeg_nvenc_preset,
     ffmpeg_path,
@@ -28,7 +30,7 @@ from hls_video.config import (
     ffmpeg_variants_filter,
 )
 from hls_video.ffmpeg_runner import run_ffmpeg
-from hls_video.hwaccel import Backend, resolve_hwaccel
+from hls_video.hwaccel import Backend, resolve_cuvid, resolve_hwaccel
 from hls_video.master_playlist import build_master_playlist
 from hls_video.progress_parser import create_progress_parser
 
@@ -75,14 +77,21 @@ DEFAULT_VARIANTS: list[Variant] = [
 ]
 
 
-def _filter_complex_split(variants: list[Variant], *, portrait: bool = False) -> str:
+def _filter_complex_split(
+    variants: list[Variant],
+    *,
+    portrait: bool = False,
+    scale_filter: str = "scale",
+) -> str:
     """1 decode → N scale への split チェーンを組む。
 
     `[0:v]split=N[v0][v1]...; [v0]scale=...[vo0]; [v1]scale=...[vo1]; ...`
 
-    縦動画 (portrait=True) では scale の w/h を入れ替え、variant.height を
-    **短辺** として扱う。これにより 240p の縦動画が 135x240 ではなく 240x426 に
-    なり、NVENC の最小解像度制約 (≥145px) を満たせる。
+    - `portrait=True`: 縦動画向けに w/h を入れ替え、variant.height を短辺扱い
+    - `scale_filter`: `scale` (CPU) か `scale_cuda` (CUVID decode 時)。
+      scale_cuda は GPU メモリ上で解像度変換するので decode → scale → encode まで
+      GPU に常駐し、メモリコピーが一切発生しない。ffmpeg 4.4 以降は
+      `force_original_aspect_ratio` / `force_divisible_by` オプション対応。
     """
     n = len(variants)
     labels = "".join(f"[v{i}]" for i in range(n))
@@ -90,15 +99,13 @@ def _filter_complex_split(variants: list[Variant], *, portrait: bool = False) ->
     for i, v in enumerate(variants):
         short_edge = v["height"]
         if portrait:
-            # 縦動画: 横幅 (短辺) を short_edge に合わせる
             scale = (
-                f"scale=w={short_edge}:h=-2:"
+                f"{scale_filter}=w={short_edge}:h=-2:"
                 f"force_original_aspect_ratio=decrease:force_divisible_by=2"
             )
         else:
-            # 横動画: 従来通り高さを short_edge に合わせる
             scale = (
-                f"scale=w=-2:h={short_edge}:"
+                f"{scale_filter}=w=-2:h={short_edge}:"
                 f"force_original_aspect_ratio=decrease:force_divisible_by=2"
             )
         parts.append(f"[v{i}]{scale}[vo{i}]")
@@ -147,12 +154,16 @@ def _nvenc_variant_output_args(
     segment_seconds: int,
     gop: int,
     preset: str,
+    bframes: int,
 ) -> list[str]:
     """NVENC (h264_nvenc) の 1 variant 分。
 
     NVENC は -crf ではなく -rc vbr + -cq で品質目標を指定する。libx264 の CRF を
     近い体感画質にマップ: CRF そのまま CQ に使うと libx264 よりやや低画質側に寄るが、
     HLS 配信品質としては十分許容範囲。
+
+    `bframes=0` で B-frames を無効化すると NVENC パイプラインの並列度が上がり
+    5-15% 高速化（圧縮効率は 5-10% 悪化、ビットレート指定下では影響微小）。
     """
     playlist = os.path.join(out_dir, f"{variant['name']}.m3u8")
     seg_pattern = os.path.join(out_dir, f"{variant['name']}_%03d.ts")
@@ -165,6 +176,7 @@ def _nvenc_variant_output_args(
         "-preset", preset,
         "-rc", "vbr",
         "-cq", str(variant["crf"]),
+        "-bf", str(bframes),
         "-b:v", variant["video_bitrate"],
         "-maxrate", variant["maxrate"],
         "-bufsize", variant["bufsize"],
@@ -189,20 +201,39 @@ def build_ffmpeg_args(
     threads: int,
     nvenc_preset: str,
     portrait: bool = False,
+    cuvid_decoder: Optional[str] = None,
+    bframes: int = 0,
 ) -> list[str]:
     """フル ffmpeg 引数を組み立てる。
 
-    NVENC / CPU の分岐と filter_complex split をここに集約。テストはこの関数で。
-    portrait=True で縦動画向けに scale 式の w/h を入れ替える。
+    - `cuvid_decoder`: 非 None かつ backend="nvenc" のとき CUVID GPU decode を有効化。
+      input 側に `-hwaccel cuda -hwaccel_output_format cuda -c:v <cuvid>` を追加し、
+      filter_complex の scale を `scale_cuda` に置き換えて全工程を GPU 上で完結させる。
+    - `bframes`: NVENC 出力に `-bf <N>` を付与。0 で無効化（速度優先）。libx264 は未使用。
     """
-    filter_complex = _filter_complex_split(variants, portrait=portrait)
-    args: list[str] = ["-y", "-i", input_path, "-filter_complex", filter_complex]
+    use_cuvid = cuvid_decoder is not None and backend == "nvenc"
+    filter_complex = _filter_complex_split(
+        variants, portrait=portrait,
+        scale_filter="scale_cuda" if use_cuvid else "scale",
+    )
+
+    args: list[str] = ["-y"]
+    if use_cuvid:
+        # -i の前に HW accel と decoder を指定する必要がある
+        args.extend([
+            "-hwaccel", "cuda",
+            "-hwaccel_output_format", "cuda",
+            "-c:v", cuvid_decoder,  # type: ignore[list-item]
+        ])
+    args.extend(["-i", input_path, "-filter_complex", filter_complex])
+
     for i, v in enumerate(variants):
         label = f"[vo{i}]"
         if backend == "nvenc":
             args.extend(_nvenc_variant_output_args(
                 v, out_dir=output_dir, map_label=label,
                 segment_seconds=segment_seconds, gop=gop, preset=nvenc_preset,
+                bframes=bframes,
             ))
         else:
             args.extend(_cpu_variant_output_args(
@@ -228,6 +259,9 @@ def convert_mp4_to_hls(
     nvenc_preset: Optional[str] = None,
     input_width: Optional[int] = None,
     input_height: Optional[int] = None,
+    input_codec: Optional[str] = None,
+    cuvid_mode: Optional[str] = None,
+    bframes: Optional[int] = None,
 ) -> dict:
     selected = variants or DEFAULT_VARIANTS
 
@@ -247,6 +281,14 @@ def convert_mp4_to_hls(
     preset_ = preset or ffmpeg_preset()
     nvenc_preset_ = nvenc_preset or ffmpeg_nvenc_preset()
     threads_ = threads if threads is not None else ffmpeg_threads()
+    bframes_ = bframes if bframes is not None else ffmpeg_bframes()
+
+    # CUVID decoder 解決。NVENC バックエンド時のみ有効。
+    cuvid_decoder: Optional[str] = None
+    if backend == "nvenc":
+        cuvid_decoder = resolve_cuvid(
+            cuvid_mode or ffmpeg_cuvid(), input_codec or "", ffmpeg_path(),
+        )
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -261,16 +303,18 @@ def convert_mp4_to_hls(
 
     logger.info(
         "HLS encode: backend=%s variants=%s preset=%s nvenc_preset=%s "
-        "threads=%d gop=%d portrait=%s (in=%sx%s)",
+        "threads=%d gop=%d portrait=%s (in=%sx%s codec=%s) "
+        "cuvid=%s bframes=%d",
         backend, [v["name"] for v in selected], preset_, nvenc_preset_,
-        threads_, gop, portrait, input_width, input_height,
+        threads_, gop, portrait, input_width, input_height, input_codec,
+        cuvid_decoder or "off", bframes_,
     )
 
     args = build_ffmpeg_args(
         input_path=input_path, output_dir=str(out), variants=selected,
         segment_seconds=segment_seconds, gop=gop, backend=backend,
         preset=preset_, threads=threads_, nvenc_preset=nvenc_preset_,
-        portrait=portrait,
+        portrait=portrait, cuvid_decoder=cuvid_decoder, bframes=bframes_,
     )
 
     stderr_handler = (
@@ -291,4 +335,6 @@ def convert_mp4_to_hls(
         "master_path": str(out / "master.m3u8"),
         "variants": [v["name"] for v in selected],
         "backend": backend,
+        "cuvid": cuvid_decoder,
+        "bframes": bframes_,
     }

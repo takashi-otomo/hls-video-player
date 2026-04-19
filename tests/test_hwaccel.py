@@ -11,8 +11,10 @@ from hls_video import hwaccel
 @pytest.fixture(autouse=True)
 def _clear_cache():
     hwaccel.detect_nvenc.cache_clear()
+    hwaccel._list_decoders.cache_clear()
     yield
     hwaccel.detect_nvenc.cache_clear()
+    hwaccel._list_decoders.cache_clear()
 
 
 def _encoders_output(with_nvenc: bool) -> bytes:
@@ -65,3 +67,70 @@ class TestResolveHwaccel:
         monkeypatch.setattr(hwaccel, "detect_nvenc", lambda _p="ffmpeg": False)
         assert hwaccel.resolve_hwaccel("") == "cpu"
         assert hwaccel.resolve_hwaccel(None) == "cpu"  # type: ignore[arg-type]
+
+
+def _decoders_output(codecs: list[str]) -> bytes:
+    base = b"V..... mpeg4                MPEG-4 part 2\n"
+    for c in codecs:
+        base += f"V..... {c}             (cuvid decoder)\n".encode()
+    return base
+
+
+class TestDetectCuvid:
+    def test_returns_decoder_when_listed(self, monkeypatch):
+        monkeypatch.setattr(
+            hwaccel.subprocess, "check_output",
+            lambda *_a, **_kw: _decoders_output(["h264_cuvid", "hevc_cuvid"]),
+        )
+        assert hwaccel.detect_cuvid("h264") == "h264_cuvid"
+        assert hwaccel.detect_cuvid("hevc") == "hevc_cuvid"
+        # h265 はエイリアス扱いで hevc_cuvid にマップされる
+        assert hwaccel.detect_cuvid("h265") == "hevc_cuvid"
+
+    def test_returns_none_when_codec_unknown(self, monkeypatch):
+        monkeypatch.setattr(
+            hwaccel.subprocess, "check_output",
+            lambda *_a, **_kw: _decoders_output(["h264_cuvid"]),
+        )
+        # 未サポート codec
+        assert hwaccel.detect_cuvid("prores") is None
+
+    def test_returns_none_when_not_in_decoders(self, monkeypatch):
+        # h264 はマップにあるが ffmpeg ビルドに h264_cuvid が入っていない場合
+        monkeypatch.setattr(
+            hwaccel.subprocess, "check_output",
+            lambda *_a, **_kw: _decoders_output([]),
+        )
+        assert hwaccel.detect_cuvid("h264") is None
+
+    def test_returns_none_when_codec_empty(self):
+        assert hwaccel.detect_cuvid("") is None
+
+    def test_returns_none_when_ffmpeg_missing(self, monkeypatch):
+        def boom(*_a, **_kw):
+            raise FileNotFoundError
+        monkeypatch.setattr(hwaccel.subprocess, "check_output", boom)
+        assert hwaccel.detect_cuvid("h264", "/nope/ffmpeg") is None
+
+
+class TestResolveCuvid:
+    def test_off_returns_none(self, monkeypatch):
+        monkeypatch.setattr(hwaccel, "detect_cuvid", lambda _c, _p="ffmpeg": "h264_cuvid")
+        assert hwaccel.resolve_cuvid("off", "h264") is None
+
+    def test_auto_returns_detected_decoder(self, monkeypatch):
+        monkeypatch.setattr(hwaccel, "detect_cuvid", lambda _c, _p="ffmpeg": "h264_cuvid")
+        assert hwaccel.resolve_cuvid("auto", "h264") == "h264_cuvid"
+
+    def test_auto_returns_none_when_no_decoder(self, monkeypatch):
+        monkeypatch.setattr(hwaccel, "detect_cuvid", lambda _c, _p="ffmpeg": None)
+        assert hwaccel.resolve_cuvid("auto", "prores") is None
+
+    def test_on_falls_back_when_no_decoder(self, monkeypatch):
+        """on 指定でも検出できなければ None を返す（警告ログのみ）"""
+        monkeypatch.setattr(hwaccel, "detect_cuvid", lambda _c, _p="ffmpeg": None)
+        assert hwaccel.resolve_cuvid("on", "prores") is None
+
+    def test_empty_mode_treated_as_auto(self, monkeypatch):
+        monkeypatch.setattr(hwaccel, "detect_cuvid", lambda _c, _p="ffmpeg": "h264_cuvid")
+        assert hwaccel.resolve_cuvid("", "h264") == "h264_cuvid"

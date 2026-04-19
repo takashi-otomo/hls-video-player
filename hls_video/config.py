@@ -66,6 +66,35 @@ def ffmpeg_hwaccel() -> str:
     return os.environ.get("FFMPEG_HWACCEL", "auto").lower()
 
 
+def ffmpeg_cuvid() -> str:
+    """FFMPEG_CUVID: "auto" (既定) / "on" / "off"。
+
+    NVENC 使用時に **GPU decode (CUVID)** も使うかどうか。有効なら input 側で
+    `-hwaccel cuda -hwaccel_output_format cuda -c:v <codec>_cuvid` を追加し、
+    filter_complex も `scale_cuda` に置き換える。これで decode もメモリコピー
+    なしで GPU に乗るため CPU decode ネックが解消される。
+
+    auto: 入力 codec に対応する cuvid decoder が ffmpeg にあれば自動有効化。
+    on: 対応が検出できれば使う（auto と同挙動だが警告ログを出す）。
+    off: CPU decode のまま (NVENC encode のみ)。
+    """
+    return os.environ.get("FFMPEG_CUVID", "auto").lower()
+
+
+def ffmpeg_bframes() -> int:
+    """NVENC の -bf 値。既定 0 (B-frames 無効で速度優先)。
+
+    libx264 には影響しない。NVENC でのみ出力オプションとして付与。
+    `-bf 2`〜`-bf 3` にすると圧縮効率が 5-10% 上がるが速度は少し落ちる。
+    """
+    raw = os.environ.get("FFMPEG_BFRAMES", "0")
+    try:
+        v = int(raw)
+    except ValueError:
+        return 0
+    return max(0, v)
+
+
 def ffmpeg_variants_filter() -> list[str] | None:
     """FFMPEG_VARIANTS="720p,360p" のように絞り込む。未指定なら全解像度。"""
     raw = os.environ.get("FFMPEG_VARIANTS", "").strip()

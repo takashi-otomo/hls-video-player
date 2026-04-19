@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from hls_video.ffmpeg_runner import probe_duration_seconds, probe_video_dimensions
+from hls_video.ffmpeg_runner import probe_duration_seconds, probe_video_stream
 from hls_video.hls_converter import convert_mp4_to_hls
 from hls_video.job_registry import JobRegistry
 from hls_video.sprite_generator import generate_sprite
@@ -92,14 +92,18 @@ def run_conversion(
         t_probe = time.monotonic()
         duration = probe_duration_seconds(str(input_path))
         try:
-            in_w, in_h = probe_video_dimensions(str(input_path))
+            stream = probe_video_stream(str(input_path))
+            in_w = int(stream.get("width") or 0)
+            in_h = int(stream.get("height") or 0)
+            in_codec = str(stream.get("codec_name") or "")
         except Exception as e:
-            # probe 失敗しても encode は landscape 前提で続行
-            logger.warning("[%s] video dimension probe failed: %s", video_id, e)
-            in_w, in_h = 0, 0
+            # probe 失敗しても encode は landscape 前提 / CPU decode で続行
+            logger.warning("[%s] video stream probe failed: %s", video_id, e)
+            in_w, in_h, in_codec = 0, 0, ""
         logger.info(
-            "[%s] probe done: duration=%.1fs, size=%dx%d (took %.1fs)",
-            video_id, duration, in_w, in_h, time.monotonic() - t_probe,
+            "[%s] probe done: duration=%.1fs, size=%dx%d codec=%s (took %.1fs)",
+            video_id, duration, in_w, in_h, in_codec or "?",
+            time.monotonic() - t_probe,
         )
         registry.update(
             job_id,
@@ -143,6 +147,7 @@ def run_conversion(
             on_progress=on_hls_progress,
             input_width=in_w,
             input_height=in_h,
+            input_codec=in_codec,
         )
         logger.info(
             "[%s] HLS stage done (%.1fs)",

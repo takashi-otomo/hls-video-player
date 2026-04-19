@@ -42,7 +42,8 @@ def test_run_conversion_updates_stages_and_progress(tmp_path, monkeypatch):
 
     import hls_video.conversion_runner as runner_mod
     monkeypatch.setattr(runner_mod, "probe_duration_seconds", fake_probe)
-    monkeypatch.setattr(runner_mod, "probe_video_dimensions", lambda _p: (1920, 1080))
+    monkeypatch.setattr(runner_mod, "probe_video_stream",
+                        lambda _p: {"width": 1920, "height": 1080, "codec_name": "h264"})
     monkeypatch.setattr(runner_mod, "convert_mp4_to_hls", fake_convert)
     monkeypatch.setattr(runner_mod, "generate_sprite", fake_sprite)
 
@@ -66,7 +67,8 @@ def test_run_conversion_marks_failed_on_exception(tmp_path, monkeypatch):
 
     import hls_video.conversion_runner as runner_mod
     monkeypatch.setattr(runner_mod, "probe_duration_seconds", lambda _p: 10.0)
-    monkeypatch.setattr(runner_mod, "probe_video_dimensions", lambda _p: (0, 0))
+    monkeypatch.setattr(runner_mod, "probe_video_stream",
+                        lambda _p: {"width": 0, "height": 0, "codec_name": ""})
 
     def boom(**kwargs):
         raise RuntimeError("ffmpeg blew up")
@@ -118,7 +120,8 @@ def test_run_conversion_uses_source_path_and_cleans_up(tmp_path, monkeypatch):
         captured["sprite_input"] = kw.get("input_path")
 
     monkeypatch.setattr(runner_mod, "probe_duration_seconds", fake_probe)
-    monkeypatch.setattr(runner_mod, "probe_video_dimensions", lambda _p: (0, 0))
+    monkeypatch.setattr(runner_mod, "probe_video_stream",
+                        lambda _p: {"width": 0, "height": 0, "codec_name": ""})
     monkeypatch.setattr(runner_mod, "convert_mp4_to_hls", fake_convert)
     monkeypatch.setattr(runner_mod, "generate_sprite", fake_sprite)
 
@@ -150,7 +153,7 @@ def test_run_conversion_source_path_is_cleaned_up_by_default(tmp_path, monkeypat
 
     import hls_video.conversion_runner as runner_mod
     monkeypatch.setattr(runner_mod, "probe_duration_seconds", lambda p: 1.0)
-    monkeypatch.setattr(runner_mod, "probe_video_dimensions", lambda p: (0, 0))
+    monkeypatch.setattr(runner_mod, "probe_video_stream", lambda p: {"width": 0, "height": 0, "codec_name": ""})
     monkeypatch.setattr(runner_mod, "convert_mp4_to_hls", lambda **_k: None)
     monkeypatch.setattr(runner_mod, "generate_sprite", lambda **_k: None)
 
@@ -176,7 +179,7 @@ def test_run_conversion_keeps_source_when_explicit_false(tmp_path, monkeypatch):
 
     import hls_video.conversion_runner as runner_mod
     monkeypatch.setattr(runner_mod, "probe_duration_seconds", lambda p: 1.0)
-    monkeypatch.setattr(runner_mod, "probe_video_dimensions", lambda p: (0, 0))
+    monkeypatch.setattr(runner_mod, "probe_video_stream", lambda p: {"width": 0, "height": 0, "codec_name": ""})
     monkeypatch.setattr(runner_mod, "convert_mp4_to_hls", lambda **_k: None)
     monkeypatch.setattr(runner_mod, "generate_sprite", lambda **_k: None)
 
@@ -203,7 +206,7 @@ def test_run_conversion_without_source_path_does_not_touch_source(tmp_path, monk
 
     import hls_video.conversion_runner as runner_mod
     monkeypatch.setattr(runner_mod, "probe_duration_seconds", lambda p: 1.0)
-    monkeypatch.setattr(runner_mod, "probe_video_dimensions", lambda p: (0, 0))
+    monkeypatch.setattr(runner_mod, "probe_video_stream", lambda p: {"width": 0, "height": 0, "codec_name": ""})
     monkeypatch.setattr(runner_mod, "convert_mp4_to_hls", lambda **_k: None)
     monkeypatch.setattr(runner_mod, "generate_sprite", lambda **_k: None)
 
