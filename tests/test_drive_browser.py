@@ -9,6 +9,7 @@ from hls_video.drive_browser import (
     BrowseEntry,
     list_videos_under,
     import_file,
+    purge_stale_staging,
     stage_to_local,
 )
 
@@ -220,3 +221,64 @@ class TestStageToLocal:
         src.write_text("")
         res = stage_to_local(str(src), str(tmp_path / "stage"))
         assert res["ok"] is False
+
+
+class TestPurgeStaleStaging:
+    def test_returns_zero_when_dir_missing(self, tmp_path):
+        assert purge_stale_staging(str(tmp_path / "nope")) == 0
+
+    def test_removes_old_video_files(self, tmp_path):
+        import time as _time
+        staging = tmp_path / "stage"
+        staging.mkdir()
+        old = staging / "old.mp4"
+        old.write_bytes(b"X")
+        # mtime を 2 時間前に
+        old_time = _time.time() - 7200
+        os.utime(old, (old_time, old_time))
+
+        removed = purge_stale_staging(str(staging), older_than_seconds=3600)
+        assert removed == 1
+        assert not old.exists()
+
+    def test_keeps_fresh_files(self, tmp_path):
+        staging = tmp_path / "stage"
+        staging.mkdir()
+        fresh = staging / "fresh.mp4"
+        fresh.write_bytes(b"X")
+
+        removed = purge_stale_staging(str(staging), older_than_seconds=3600)
+        assert removed == 0
+        assert fresh.exists()
+
+    def test_ignores_non_video_files(self, tmp_path):
+        import time as _time
+        staging = tmp_path / "stage"
+        staging.mkdir()
+        log = staging / "notes.txt"
+        log.write_text("keep me")
+        old_time = _time.time() - 7200
+        os.utime(log, (old_time, old_time))
+
+        removed = purge_stale_staging(str(staging), older_than_seconds=3600)
+        assert removed == 0
+        assert log.exists()
+
+    def test_stage_to_local_triggers_purge(self, tmp_path):
+        """stage_to_local 呼び出し時に古い孤児ファイルが自動掃除される。"""
+        import time as _time
+        staging = tmp_path / "stage"
+        staging.mkdir()
+        orphan = staging / "orphan.mp4"
+        orphan.write_bytes(b"OLD")
+        old_time = _time.time() - 7200
+        os.utime(orphan, (old_time, old_time))
+
+        src = tmp_path / "drive" / "new.mp4"
+        src.parent.mkdir()
+        src.write_bytes(b"NEW")
+
+        res = stage_to_local(str(src), str(staging))
+        assert res["ok"] is True
+        assert not orphan.exists(), "古いステージングが掃除されるはず"
+        assert (staging / "new.mp4").exists()

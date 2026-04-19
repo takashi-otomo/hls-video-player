@@ -36,17 +36,21 @@ def run_conversion(
     source_file: str,
     video_id: str,
     source_path: str | None = None,
-    cleanup_source_after: bool = False,
+    cleanup_source_after: bool | None = None,
 ) -> None:
     """変換ジョブ本体。
 
     - `source_file` は表示用（Job.source_file や UI ログ用）
     - `source_path` を明示した場合はそちらを ffmpeg 入力に使う（Colab のステージング
       対応）。省略時は従来通り `{media_root}/source/{source_file}` を参照。
-    - `cleanup_source_after=True` のとき、成功時・失敗時のどちらも入力ファイルを
-      unlink する（ステージングで /tmp に置いた一時ファイル向け）。
-      成功時のみ消す等の細かい制御が必要なら別途フラグを用意すること。
+    - `cleanup_source_after` が `None` (既定) のときは **`source_path` 指定時のみ
+      True として解決**。これは「ステージング (=一時ファイル) は変換後に必ず消す」
+      という原則を反映。`media/source/` 直のファイルはユーザー原本なので既定で保持。
+      明示的に True/False を渡せばその値が使われる。
+    - True のとき、成功時・失敗時のどちらも `source_path` を unlink する。
     """
+    if cleanup_source_after is None:
+        cleanup_source_after = source_path is not None
     if source_path:
         input_path = Path(source_path)
     else:

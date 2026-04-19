@@ -42,6 +42,7 @@ def test_run_conversion_updates_stages_and_progress(tmp_path, monkeypatch):
 
     import hls_video.conversion_runner as runner_mod
     monkeypatch.setattr(runner_mod, "probe_duration_seconds", fake_probe)
+    monkeypatch.setattr(runner_mod, "probe_video_dimensions", lambda _p: (1920, 1080))
     monkeypatch.setattr(runner_mod, "convert_mp4_to_hls", fake_convert)
     monkeypatch.setattr(runner_mod, "generate_sprite", fake_sprite)
 
@@ -65,6 +66,7 @@ def test_run_conversion_marks_failed_on_exception(tmp_path, monkeypatch):
 
     import hls_video.conversion_runner as runner_mod
     monkeypatch.setattr(runner_mod, "probe_duration_seconds", lambda _p: 10.0)
+    monkeypatch.setattr(runner_mod, "probe_video_dimensions", lambda _p: (0, 0))
 
     def boom(**kwargs):
         raise RuntimeError("ffmpeg blew up")
@@ -116,6 +118,7 @@ def test_run_conversion_uses_source_path_and_cleans_up(tmp_path, monkeypatch):
         captured["sprite_input"] = kw.get("input_path")
 
     monkeypatch.setattr(runner_mod, "probe_duration_seconds", fake_probe)
+    monkeypatch.setattr(runner_mod, "probe_video_dimensions", lambda _p: (0, 0))
     monkeypatch.setattr(runner_mod, "convert_mp4_to_hls", fake_convert)
     monkeypatch.setattr(runner_mod, "generate_sprite", fake_sprite)
 
@@ -136,8 +139,34 @@ def test_run_conversion_uses_source_path_and_cleans_up(tmp_path, monkeypatch):
     assert not staged.exists()
 
 
-def test_run_conversion_keeps_source_by_default(tmp_path, monkeypatch):
-    """cleanup_source_after=False のときはステージを消さない。"""
+def test_run_conversion_source_path_is_cleaned_up_by_default(tmp_path, monkeypatch):
+    """`source_path` 指定時は既定でステージを削除（cleanup_source_after を省略）。"""
+    reg = JobRegistry(max_workers=1)
+    job = reg.create(video_id="auto", source_file="auto.mp4")
+
+    staged = tmp_path / "stage" / "auto.mp4"
+    staged.parent.mkdir()
+    staged.write_bytes(b"X")
+
+    import hls_video.conversion_runner as runner_mod
+    monkeypatch.setattr(runner_mod, "probe_duration_seconds", lambda p: 1.0)
+    monkeypatch.setattr(runner_mod, "probe_video_dimensions", lambda p: (0, 0))
+    monkeypatch.setattr(runner_mod, "convert_mp4_to_hls", lambda **_k: None)
+    monkeypatch.setattr(runner_mod, "generate_sprite", lambda **_k: None)
+
+    run_conversion(
+        registry=reg, job_id=job.id,
+        media_root=str(tmp_path),
+        source_file="auto.mp4",
+        video_id="auto",
+        source_path=str(staged),
+        # cleanup_source_after 未指定 → source_path があるので True に解決される
+    )
+    assert not staged.exists(), "source_path 指定時は既定で削除される"
+
+
+def test_run_conversion_keeps_source_when_explicit_false(tmp_path, monkeypatch):
+    """明示的に cleanup_source_after=False を渡せば保持する。"""
     reg = JobRegistry(max_workers=1)
     job = reg.create(video_id="keep", source_file="keep.mp4")
 
@@ -147,6 +176,7 @@ def test_run_conversion_keeps_source_by_default(tmp_path, monkeypatch):
 
     import hls_video.conversion_runner as runner_mod
     monkeypatch.setattr(runner_mod, "probe_duration_seconds", lambda p: 1.0)
+    monkeypatch.setattr(runner_mod, "probe_video_dimensions", lambda p: (0, 0))
     monkeypatch.setattr(runner_mod, "convert_mp4_to_hls", lambda **_k: None)
     monkeypatch.setattr(runner_mod, "generate_sprite", lambda **_k: None)
 
@@ -156,5 +186,33 @@ def test_run_conversion_keeps_source_by_default(tmp_path, monkeypatch):
         source_file="keep.mp4",
         video_id="keep",
         source_path=str(staged),
+        cleanup_source_after=False,
     )
     assert staged.exists()
+
+
+def test_run_conversion_without_source_path_does_not_touch_source(tmp_path, monkeypatch):
+    """`source_path` を渡さなければ `media/source/` のファイルは絶対に消さない。"""
+    reg = JobRegistry(max_workers=1)
+    job = reg.create(video_id="original", source_file="original.mp4")
+
+    # media/source/original.mp4 を配置（ユーザー原本相当）
+    (tmp_path / "source").mkdir()
+    src_in_media = tmp_path / "source" / "original.mp4"
+    src_in_media.write_bytes(b"USER_ORIGINAL")
+
+    import hls_video.conversion_runner as runner_mod
+    monkeypatch.setattr(runner_mod, "probe_duration_seconds", lambda p: 1.0)
+    monkeypatch.setattr(runner_mod, "probe_video_dimensions", lambda p: (0, 0))
+    monkeypatch.setattr(runner_mod, "convert_mp4_to_hls", lambda **_k: None)
+    monkeypatch.setattr(runner_mod, "generate_sprite", lambda **_k: None)
+
+    run_conversion(
+        registry=reg, job_id=job.id,
+        media_root=str(tmp_path),
+        source_file="original.mp4",
+        video_id="original",
+        # source_path なし → cleanup は無効化されるべき
+    )
+    assert src_in_media.exists(), "原本は削除してはいけない"
+    assert src_in_media.read_bytes() == b"USER_ORIGINAL"

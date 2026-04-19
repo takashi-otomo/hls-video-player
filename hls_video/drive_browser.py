@@ -159,11 +159,45 @@ def import_file(src_path: str, media_root: str, *, overwrite: bool = False) -> d
 import_as_symlink = import_file
 
 
+def purge_stale_staging(staging_dir: str, *, older_than_seconds: int = 3600) -> int:
+    """ステージング領域で N 秒以上前にコピーされた孤児ファイルを削除する。
+
+    Colab ランタイム切断などで `run_conversion` の finally が走らず残った
+    staged ファイルの回収用。
+
+    - 動作中のジョブ（同じ staging を使っている）を誤って消さないよう、
+      `older_than_seconds` (既定 1 時間) のしきい値を設ける。
+    - 拡張子が `VIDEO_EXTS` のものだけを対象。ログや隠しファイルは触らない。
+    - 返り値: 削除したファイル数。
+    """
+    out_dir = Path(staging_dir)
+    if not out_dir.is_dir():
+        return 0
+    cutoff = time.time() - older_than_seconds
+    removed = 0
+    for p in out_dir.iterdir():
+        if not p.is_file():
+            continue
+        if p.suffix.lower() not in VIDEO_EXTS:
+            continue
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink()
+                logger.info("purged stale staging file: %s", p)
+                removed += 1
+        except OSError as e:
+            logger.warning("failed to purge %s: %s", p, e)
+    return removed
+
+
 def stage_to_local(src_path: str, staging_dir: str) -> dict:
     """Drive 上の動画ファイルを Colab ローカル SSD (ステージング領域) にコピーする。
 
     Drive FUSE は sequential read が遅いので、ffmpeg に渡す前に一度ローカルへ
     コピーしてから変換する。戻り値の `path` を run_conversion(source_path=...) に渡す。
+
+    副作用: ステージング前に `purge_stale_staging` を呼び、1 時間以上前の
+    取り残し (前回ランタイムでクラッシュしたジョブ等) を掃除する。
 
     戻り値 dict:
       - ok (bool)
@@ -184,6 +218,9 @@ def stage_to_local(src_path: str, staging_dir: str) -> dict:
 
     out_dir = Path(staging_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    # 前回の取り残し掃除（他ジョブの staged ファイルを壊さないよう 1h しきい値）
+    purge_stale_staging(str(out_dir))
+
     dst = out_dir / src.name
     size_mb = src.stat().st_size / (1024 * 1024)
 
