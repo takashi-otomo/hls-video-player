@@ -12,6 +12,10 @@ __pycache__/
 build/
 dist/
 
+# Gradio dev runtime files
+.gradio/
+flagged/
+
 # Generated media assets — commit only README placeholders
 media/source/*
 media/hls/*
