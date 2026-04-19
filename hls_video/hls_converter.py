@@ -75,19 +75,33 @@ DEFAULT_VARIANTS: list[Variant] = [
 ]
 
 
-def _filter_complex_split(variants: list[Variant]) -> str:
+def _filter_complex_split(variants: list[Variant], *, portrait: bool = False) -> str:
     """1 decode → N scale への split チェーンを組む。
 
     `[0:v]split=N[v0][v1]...; [v0]scale=...[vo0]; [v1]scale=...[vo1]; ...`
+
+    縦動画 (portrait=True) では scale の w/h を入れ替え、variant.height を
+    **短辺** として扱う。これにより 240p の縦動画が 135x240 ではなく 240x426 に
+    なり、NVENC の最小解像度制約 (≥145px) を満たせる。
     """
     n = len(variants)
     labels = "".join(f"[v{i}]" for i in range(n))
     parts = [f"[0:v]split={n}{labels}"]
     for i, v in enumerate(variants):
-        parts.append(
-            f"[v{i}]scale=w=-2:h={v['height']}:"
-            f"force_original_aspect_ratio=decrease:force_divisible_by=2[vo{i}]"
-        )
+        short_edge = v["height"]
+        if portrait:
+            # 縦動画: 横幅 (短辺) を short_edge に合わせる
+            scale = (
+                f"scale=w={short_edge}:h=-2:"
+                f"force_original_aspect_ratio=decrease:force_divisible_by=2"
+            )
+        else:
+            # 横動画: 従来通り高さを short_edge に合わせる
+            scale = (
+                f"scale=w=-2:h={short_edge}:"
+                f"force_original_aspect_ratio=decrease:force_divisible_by=2"
+            )
+        parts.append(f"[v{i}]{scale}[vo{i}]")
     return ";".join(parts)
 
 
@@ -174,12 +188,14 @@ def build_ffmpeg_args(
     preset: str,
     threads: int,
     nvenc_preset: str,
+    portrait: bool = False,
 ) -> list[str]:
     """フル ffmpeg 引数を組み立てる。
 
     NVENC / CPU の分岐と filter_complex split をここに集約。テストはこの関数で。
+    portrait=True で縦動画向けに scale 式の w/h を入れ替える。
     """
-    filter_complex = _filter_complex_split(variants)
+    filter_complex = _filter_complex_split(variants, portrait=portrait)
     args: list[str] = ["-y", "-i", input_path, "-filter_complex", filter_complex]
     for i, v in enumerate(variants):
         label = f"[vo{i}]"
@@ -210,6 +226,8 @@ def convert_mp4_to_hls(
     on_progress: Optional[Callable[[float, dict], None]] = None,
     hwaccel: Optional[str] = None,
     nvenc_preset: Optional[str] = None,
+    input_width: Optional[int] = None,
+    input_height: Optional[int] = None,
 ) -> dict:
     selected = variants or DEFAULT_VARIANTS
 
@@ -235,15 +253,24 @@ def convert_mp4_to_hls(
 
     gop = max(2, round(segment_seconds * fps))
 
+    # orientation 判定: 縦動画（height > width）のとき portrait=True。
+    # 0/None の場合は landscape 扱い（既存挙動）。
+    portrait = bool(
+        input_width and input_height and int(input_height) > int(input_width)
+    )
+
     logger.info(
-        "HLS encode: backend=%s variants=%s preset=%s nvenc_preset=%s threads=%d gop=%d",
-        backend, [v["name"] for v in selected], preset_, nvenc_preset_, threads_, gop,
+        "HLS encode: backend=%s variants=%s preset=%s nvenc_preset=%s "
+        "threads=%d gop=%d portrait=%s (in=%sx%s)",
+        backend, [v["name"] for v in selected], preset_, nvenc_preset_,
+        threads_, gop, portrait, input_width, input_height,
     )
 
     args = build_ffmpeg_args(
         input_path=input_path, output_dir=str(out), variants=selected,
         segment_seconds=segment_seconds, gop=gop, backend=backend,
         preset=preset_, threads=threads_, nvenc_preset=nvenc_preset_,
+        portrait=portrait,
     )
 
     stderr_handler = (

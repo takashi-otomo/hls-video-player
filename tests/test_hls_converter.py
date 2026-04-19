@@ -136,6 +136,50 @@ class TestBuildFfmpegArgsNVENC:
         assert "split=4" in fc
 
 
+class TestPortraitScaling:
+    """縦動画向けに scale 式の w/h が入れ替わることを検証。
+
+    横動画で variant.height=240 を適用すると 135x240 (NVENC 最小解像度違反) に
+    なるバグを防ぐための orientation-aware スケーリング。
+    """
+
+    def test_landscape_scales_height(self):
+        # portrait=False: 従来通り h=short_edge
+        args = build_ffmpeg_args(
+            input_path="/tmp/in.mp4", output_dir="/out",
+            variants=[DEFAULT_VARIANTS[3]],  # 240p
+            segment_seconds=4, gop=48, backend="cpu",
+            preset="ultrafast", threads=0, nvenc_preset="p4",
+            portrait=False,
+        )
+        fc = args[args.index("-filter_complex") + 1]
+        assert "scale=w=-2:h=240" in fc
+
+    def test_portrait_scales_width(self):
+        # portrait=True: w=short_edge にすべき
+        args = build_ffmpeg_args(
+            input_path="/tmp/in.mp4", output_dir="/out",
+            variants=[DEFAULT_VARIANTS[3]],  # 240p
+            segment_seconds=4, gop=48, backend="cpu",
+            preset="ultrafast", threads=0, nvenc_preset="p4",
+            portrait=True,
+        )
+        fc = args[args.index("-filter_complex") + 1]
+        assert "scale=w=240:h=-2" in fc
+
+    def test_portrait_applies_to_all_variants(self):
+        args = build_ffmpeg_args(
+            input_path="/tmp/in.mp4", output_dir="/out",
+            variants=DEFAULT_VARIANTS,
+            segment_seconds=4, gop=48, backend="nvenc",
+            preset="ultrafast", threads=0, nvenc_preset="p4",
+            portrait=True,
+        )
+        fc = args[args.index("-filter_complex") + 1]
+        for v in DEFAULT_VARIANTS:
+            assert f"scale=w={v['height']}:h=-2" in fc
+
+
 class TestVariantSubset:
     def test_two_variants_split_two(self):
         two = [DEFAULT_VARIANTS[0], DEFAULT_VARIANTS[2]]  # 720p + 360p

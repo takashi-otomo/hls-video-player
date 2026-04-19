@@ -166,6 +166,36 @@ def probe_duration_seconds(
     return float(data.get("format", {}).get("duration", 0) or 0)
 
 
+def probe_video_dimensions(
+    input_path: str,
+    *,
+    ffprobe_path: Optional[str] = None,
+) -> tuple[int, int]:
+    """1 本目の video stream の (width, height) を返す。取得失敗時は (0, 0)。
+
+    縦動画判定（orientation-aware scaling）で利用する。
+    """
+    data = run_ffprobe_json(
+        [
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "json",
+            input_path,
+        ],
+        ffprobe_path=ffprobe_path,
+        label=f"probeV:{os.path.basename(input_path)}",
+    )
+    streams = data.get("streams", [])
+    if not streams:
+        return 0, 0
+    s = streams[0]
+    try:
+        return int(s.get("width", 0) or 0), int(s.get("height", 0) or 0)
+    except (TypeError, ValueError):
+        return 0, 0
+
+
 def _default_ffmpeg() -> str:
     return ffmpeg_path()
 
