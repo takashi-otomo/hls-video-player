@@ -65,6 +65,34 @@ class TestListVideosUnder:
         rels = [e.rel for e in result]
         assert rels == ["real/hidden.mp4"]
 
+    def test_mtime_is_populated(self, tmp_path):
+        (tmp_path / "a.mp4").write_bytes(b"")
+        result = list_videos_under(str(tmp_path))
+        assert result[0].mtime > 0
+
+    def test_already_imported_flag(self, tmp_path):
+        drive = tmp_path / "drive"
+        drive.mkdir()
+        (drive / "already.mp4").write_bytes(b"")
+        (drive / "fresh.mp4").write_bytes(b"")
+
+        media = tmp_path / "media"
+        (media / "source").mkdir(parents=True)
+        (media / "source" / "already.mp4").write_bytes(b"existing")
+
+        result = list_videos_under(str(drive), media_root=str(media))
+        by_name = {e.rel: e for e in result}
+        assert by_name["already.mp4"].already_imported is True
+        assert by_name["fresh.mp4"].already_imported is False
+
+    def test_already_imported_false_when_media_root_missing(self, tmp_path):
+        drive = tmp_path / "drive"
+        drive.mkdir()
+        (drive / "v.mp4").write_bytes(b"")
+        # media_root 未指定
+        result = list_videos_under(str(drive))
+        assert result[0].already_imported is False
+
 
 class TestImportFile:
     def test_copies_to_media_source(self, tmp_path):
