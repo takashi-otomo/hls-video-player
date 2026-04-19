@@ -35,11 +35,39 @@ CUVID_DECODERS: dict[str, str] = {
 }
 
 
+@functools.lru_cache(maxsize=1)
+def detect_cuda_runtime() -> bool:
+    """CUDA ドライバ (libcuda) が実行時にロード可能か確認する。
+
+    `ffmpeg -encoders` には `h264_nvenc` があっても、Colab で CPU ランタイムを
+    選んでいたり GPU が使えない環境だと実行時に `Cannot load libcuda.so.1` で
+    落ちる。このため「バイナリに含まれている」ではなく **nvidia-smi で
+    実際の GPU を確認** することで確実に判定する。
+    """
+    t0 = time.monotonic()
+    try:
+        subprocess.check_output(
+            ["nvidia-smi", "-L"],
+            stderr=subprocess.STDOUT, timeout=5,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        logger.info(
+            "CUDA runtime unavailable (no GPU / driver): %s", e.__class__.__name__,
+        )
+        return False
+    logger.info(
+        "CUDA runtime available (elapsed=%.2fs)", time.monotonic() - t0,
+    )
+    return True
+
+
 @functools.lru_cache(maxsize=8)
 def detect_nvenc(ffmpeg_path: str = "ffmpeg") -> bool:
-    """`ffmpeg -hide_banner -encoders` の出力に h264_nvenc が含まれるかで判定。
+    """NVENC encoder (`h264_nvenc`) がビルドに含まれ、かつ CUDA runtime も使えるか判定。
 
-    ffmpeg 起動だけで数百ms掛かるので lru_cache で実行毎に1回に抑える。
+    以前はビルド有無だけ見ていたが、Colab CPU ランタイムなど libcuda を
+    ロードできない環境では ffmpeg 実行時に落ちるため、`detect_cuda_runtime()`
+    を併せてチェックする。
     """
     t0 = time.monotonic()
     try:
@@ -51,13 +79,16 @@ def detect_nvenc(ffmpeg_path: str = "ffmpeg") -> bool:
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         logger.warning("NVENC detection failed (%s): %s", ffmpeg_path, e)
         return False
-    found = "h264_nvenc" in out
+    built_in = "h264_nvenc" in out
+    if not built_in:
+        logger.info("NVENC: binary does not include h264_nvenc")
+        return False
+    runtime = detect_cuda_runtime()
     logger.info(
-        "NVENC detection: %s (ffmpeg=%s elapsed=%.2fs)",
-        "available" if found else "unavailable",
-        ffmpeg_path, time.monotonic() - t0,
+        "NVENC detection: binary=yes runtime=%s (ffmpeg=%s elapsed=%.2fs)",
+        runtime, ffmpeg_path, time.monotonic() - t0,
     )
-    return found
+    return runtime
 
 
 def resolve_hwaccel(mode: str, ffmpeg_path: str = "ffmpeg") -> Backend:
@@ -91,7 +122,9 @@ def _list_decoders(ffmpeg_path: str = "ffmpeg") -> str:
 def detect_cuvid(input_codec: str, ffmpeg_path: str = "ffmpeg") -> Optional[str]:
     """input 側 codec_name に対応する cuvid decoder 名を返す。無ければ None。
 
-    例: "h264" → "h264_cuvid"（ffmpeg の decoders リストに含まれる場合のみ）
+    例: "h264" → "h264_cuvid"（ffmpeg に decoder が含まれ、かつ CUDA runtime
+    が実際に利用可能な場合のみ）。CPU ランタイムで libcuda が無い環境では
+    実行時に落ちるのでここで弾く。
     """
     if not input_codec:
         return None
@@ -99,7 +132,11 @@ def detect_cuvid(input_codec: str, ffmpeg_path: str = "ffmpeg") -> Optional[str]
     if not cuvid:
         return None
     decoders = _list_decoders(ffmpeg_path)
-    return cuvid if cuvid in decoders else None
+    if cuvid not in decoders:
+        return None
+    if not detect_cuda_runtime():
+        return None
+    return cuvid
 
 
 def resolve_cuvid(

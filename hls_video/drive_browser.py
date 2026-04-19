@@ -272,7 +272,11 @@ def stage_to_local(src_path: str, staging_dir: str) -> dict:
     if dst.exists() and dst.stat().st_size == src.stat().st_size:
         logger.info("staging skipped (already present): %s", dst)
     else:
-        shutil.copy2(str(src), str(dst))
+        # shutil.copy2 は copystat で utime 更新を試みるが、並列 staging や
+        # FUSE の相性で「コピーは成功したが metadata 更新で dst を見失う」
+        # 現象があるため、**データのみ** コピーする copyfile を使う。
+        # mtime は purge_stale_staging の 1h 閾値判定でのみ使うので保持不要。
+        shutil.copyfile(str(src), str(dst))
     elapsed = time.monotonic() - t0
     if elapsed > 0:
         logger.info("staging done in %.1fs (%.1f MB/s)", elapsed, size_mb / max(elapsed, 0.001))

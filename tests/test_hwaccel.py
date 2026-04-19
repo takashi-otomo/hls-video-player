@@ -12,9 +12,21 @@ from hls_video import hwaccel
 def _clear_cache():
     hwaccel.detect_nvenc.cache_clear()
     hwaccel._list_decoders.cache_clear()
+    hwaccel.detect_cuda_runtime.cache_clear()
     yield
     hwaccel.detect_nvenc.cache_clear()
     hwaccel._list_decoders.cache_clear()
+    hwaccel.detect_cuda_runtime.cache_clear()
+
+
+@pytest.fixture
+def cuda_runtime_ok(monkeypatch):
+    """CUDA runtime 可用性をテスト用に True 固定。check_output モックと干渉しない。"""
+    hwaccel.detect_cuda_runtime.cache_clear()
+    # lru_cache を剥いだシンプル関数に差し替える（cache_clear を呼ばれても壊れないよう保護）
+    replacement = lambda: True  # noqa: E731
+    replacement.cache_clear = lambda: None  # type: ignore[attr-defined]
+    monkeypatch.setattr(hwaccel, "detect_cuda_runtime", replacement)
 
 
 def _encoders_output(with_nvenc: bool) -> bytes:
@@ -25,13 +37,24 @@ def _encoders_output(with_nvenc: bool) -> bytes:
 
 
 class TestDetectNvenc:
-    def test_returns_true_when_encoder_listed(self, monkeypatch):
+    def test_returns_true_when_encoder_listed_and_runtime_available(self, monkeypatch, cuda_runtime_ok):
         def fake_check(*_a, **_kw):
             return _encoders_output(with_nvenc=True)
         monkeypatch.setattr(hwaccel.subprocess, "check_output", fake_check)
         assert hwaccel.detect_nvenc("ffmpeg") is True
 
-    def test_returns_false_when_not_listed(self, monkeypatch):
+    def test_returns_false_when_cuda_runtime_missing(self, monkeypatch):
+        """h264_nvenc がビルドにあっても CUDA runtime 無ければ False。"""
+        monkeypatch.setattr(
+            hwaccel.subprocess, "check_output",
+            lambda *_a, **_kw: _encoders_output(with_nvenc=True),
+        )
+        replacement = lambda: False  # noqa: E731
+        replacement.cache_clear = lambda: None  # type: ignore[attr-defined]
+        monkeypatch.setattr(hwaccel, "detect_cuda_runtime", replacement)
+        assert hwaccel.detect_nvenc("ffmpeg") is False
+
+    def test_returns_false_when_not_listed(self, monkeypatch, cuda_runtime_ok):
         monkeypatch.setattr(
             hwaccel.subprocess, "check_output",
             lambda *_a, **_kw: _encoders_output(with_nvenc=False),
@@ -43,6 +66,28 @@ class TestDetectNvenc:
             raise FileNotFoundError("no ffmpeg")
         monkeypatch.setattr(hwaccel.subprocess, "check_output", boom)
         assert hwaccel.detect_nvenc("/nope/ffmpeg") is False
+
+
+class TestDetectCudaRuntime:
+    def test_true_when_nvidia_smi_succeeds(self, monkeypatch):
+        # subprocess.check_output をモックすれば nvidia-smi -L 呼び出しがそのまま通る
+        monkeypatch.setattr(
+            hwaccel.subprocess, "check_output",
+            lambda *_a, **_kw: b"GPU 0: Tesla T4\n",
+        )
+        assert hwaccel.detect_cuda_runtime() is True
+
+    def test_false_when_nvidia_smi_missing(self, monkeypatch):
+        def boom(*_a, **_kw):
+            raise FileNotFoundError
+        monkeypatch.setattr(hwaccel.subprocess, "check_output", boom)
+        assert hwaccel.detect_cuda_runtime() is False
+
+    def test_false_when_nvidia_smi_nonzero(self, monkeypatch):
+        def boom(*_a, **_kw):
+            raise hwaccel.subprocess.CalledProcessError(1, "nvidia-smi")
+        monkeypatch.setattr(hwaccel.subprocess, "check_output", boom)
+        assert hwaccel.detect_cuda_runtime() is False
 
 
 class TestResolveHwaccel:
@@ -77,7 +122,7 @@ def _decoders_output(codecs: list[str]) -> bytes:
 
 
 class TestDetectCuvid:
-    def test_returns_decoder_when_listed(self, monkeypatch):
+    def test_returns_decoder_when_listed(self, monkeypatch, cuda_runtime_ok):
         monkeypatch.setattr(
             hwaccel.subprocess, "check_output",
             lambda *_a, **_kw: _decoders_output(["h264_cuvid", "hevc_cuvid"]),
@@ -87,7 +132,7 @@ class TestDetectCuvid:
         # h265 はエイリアス扱いで hevc_cuvid にマップされる
         assert hwaccel.detect_cuvid("h265") == "hevc_cuvid"
 
-    def test_returns_none_when_codec_unknown(self, monkeypatch):
+    def test_returns_none_when_codec_unknown(self, monkeypatch, cuda_runtime_ok):
         monkeypatch.setattr(
             hwaccel.subprocess, "check_output",
             lambda *_a, **_kw: _decoders_output(["h264_cuvid"]),
@@ -95,7 +140,7 @@ class TestDetectCuvid:
         # 未サポート codec
         assert hwaccel.detect_cuvid("prores") is None
 
-    def test_returns_none_when_not_in_decoders(self, monkeypatch):
+    def test_returns_none_when_not_in_decoders(self, monkeypatch, cuda_runtime_ok):
         # h264 はマップにあるが ffmpeg ビルドに h264_cuvid が入っていない場合
         monkeypatch.setattr(
             hwaccel.subprocess, "check_output",
@@ -106,11 +151,22 @@ class TestDetectCuvid:
     def test_returns_none_when_codec_empty(self):
         assert hwaccel.detect_cuvid("") is None
 
-    def test_returns_none_when_ffmpeg_missing(self, monkeypatch):
+    def test_returns_none_when_ffmpeg_missing(self, monkeypatch, cuda_runtime_ok):
         def boom(*_a, **_kw):
             raise FileNotFoundError
         monkeypatch.setattr(hwaccel.subprocess, "check_output", boom)
         assert hwaccel.detect_cuvid("h264", "/nope/ffmpeg") is None
+
+    def test_returns_none_when_cuda_runtime_missing(self, monkeypatch):
+        """h264_cuvid が decoders にあっても libcuda ロード不可なら None。"""
+        monkeypatch.setattr(
+            hwaccel.subprocess, "check_output",
+            lambda *_a, **_kw: _decoders_output(["h264_cuvid"]),
+        )
+        replacement = lambda: False  # noqa: E731
+        replacement.cache_clear = lambda: None  # type: ignore[attr-defined]
+        monkeypatch.setattr(hwaccel, "detect_cuda_runtime", replacement)
+        assert hwaccel.detect_cuvid("h264") is None
 
 
 class TestResolveCuvid:
