@@ -92,3 +92,23 @@ def test_player_page_returns_html(app_with_fixtures):
     assert r.status_code == 200
     assert "video-js" in r.text.lower() or "videojs" in r.text.lower()
     assert "vid1" in r.text
+
+
+def test_api_videos_list_returns_array(app_with_fixtures):
+    client = TestClient(app_with_fixtures)
+    r = client.get("/api/videos")
+    assert r.status_code == 200
+    body = r.json()
+    assert isinstance(body, list)
+    assert len(body) == 1
+    assert body[0]["id"] == "vid1"
+    assert body[0]["masterUrl"].endswith("master.m3u8")
+    assert body[0]["sprite"]["sheets"] == ["/sprites/vid1.jpg"]
+
+
+def test_play_page_returns_html_with_fetch_to_api_videos(app_with_fixtures):
+    client = TestClient(app_with_fixtures)
+    r = client.get("/play")
+    assert r.status_code == 200
+    assert "/api/videos" in r.text
+    assert "player/" in r.text

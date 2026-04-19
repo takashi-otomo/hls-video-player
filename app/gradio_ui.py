@@ -53,6 +53,14 @@ _CSS = """
 .hls-card-thumb--placeholder {
   background: repeating-linear-gradient(45deg, #0a0c10 0 10px, #14171f 10px 20px);
 }
+/* Drive 走査の CheckboxGroup は 10 件を超えたらスクロール。
+   Gradio 6 では内側 .wrap がチェックボックス一覧のフレックスコンテナなので
+   そこに max-height を付ける。ラベル部分は対象外に残す。 */
+.hls-file-picker .wrap {
+  max-height: 360px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
 """
 
 
@@ -200,11 +208,11 @@ def build_ui(
                     with gr.Tab("Drive / サーバから追加"):
                         gr.Markdown(
                             "指定したディレクトリ配下の `.mp4 / .mov / .mkv / .webm` を走査し、"
-                            "選んだファイルを **ローカル (`/tmp`) にコピーしてそのまま変換** します。\n"
-                            "- `media/source/` にはコピーしません（Drive への 2 重書き込みを回避）\n"
+                            "**複数選択 → キュー投入** で順次変換します。\n"
+                            "- ファイルは一度 `/tmp` (Colab ローカル SSD) にコピーしてから変換\n"
                             "- 変換先は `media/hls/`, `media/sprites/`（Drive 配下）\n"
-                            "- 変換完了 / 失敗どちらでもステージングのローカルコピーは自動削除\n"
-                            "`重複` 列に ✓: **対応する動画が既に変換済み、または `media/source/` に同名ファイルあり**。"
+                            "- 同時実行数は `MAX_CONCURRENT_JOBS` env で制御（既定 2）\n"
+                            "- ✓ [重複] が付く動画: 既に変換済み / または `media/source/` に同名あり（キュー投入時にスキップ）"
                         )
                         with gr.Row():
                             browse_path = gr.Textbox(
@@ -213,24 +221,27 @@ def build_ui(
                                 scale=4,
                             )
                             scan_btn = gr.Button("🔍 走査", scale=1)
-                        file_picker = gr.Dataframe(
-                            headers=["重複", "ファイル名", "サイズ(MB)", "更新日時"],
-                            datatype=["str", "str", "number", "str"],
-                            # col_count は古い Gradio 互換の名前。新しい Gradio では
-                            # deprecation warning が出るが column_count で動く。
-                            # Colab 側 (~5.x) との互換のためこちらを使用。
-                            col_count=(4, "fixed"),
-                            row_count=(0, "dynamic"),
-                            interactive=False,
-                            wrap=True,
-                            max_height=360,
-                            label="見つかった動画ファイル（行をクリックで選択）",
+                        sort_by = gr.Radio(
+                            choices=[
+                                ("ファイル名", "name"),
+                                ("サイズ(大→小)", "size"),
+                                ("更新日時(新→旧)", "mtime"),
+                            ],
+                            value="name",
+                            label="並び順",
+                            container=False,
+                        )
+                        file_picker = gr.CheckboxGroup(
+                            choices=[],
+                            label="変換対象（複数選択可、10 件超はスクロール）",
+                            interactive=True,
+                            elem_classes=["hls-file-picker"],
                         )
                         entries_state = gr.State([])           # list[BrowseEntry]
-                        selected_path_state = gr.State(None)   # 選択行の絶対パス
-                        selected_label = gr.Markdown(visible=False)
                         with gr.Row():
-                            convert_btn = gr.Button("🎬 変換開始 (ローカルにコピーして変換)", variant="primary")
+                            convert_btn = gr.Button("🎬 選択ぶんをキューに追加", variant="primary")
+                            select_all_btn = gr.Button("全選択", variant="secondary")
+                            clear_sel_btn = gr.Button("選択解除", variant="secondary")
                         browse_msg = gr.Markdown(visible=False)
                     with gr.Tab("PC からアップロード"):
                         gr.Markdown(
@@ -306,155 +317,154 @@ def build_ui(
 
         upload.change(_on_upload, inputs=upload, outputs=[upload_msg, sources_state, poll_timer])
 
-        # --- Drive ブラウズ ---
+        # --- Drive ブラウズ（複数選択 → キュー投入） ---
 
-        def _entries_to_df(entries) -> list[list]:
-            """list[BrowseEntry] → Dataframe 行データ。"""
+        def _entries_to_choices(entries, sort_mode: str) -> list[tuple[str, str]]:
+            """list[BrowseEntry] → (label, value) の CheckboxGroup choices。
+
+            label: "[✓] path (size, date)" 表示用。value: 絶対パス。
+            """
             from datetime import datetime
-            rows = []
+            # ソート
+            if sort_mode == "size":
+                entries = sorted(entries, key=lambda e: -e.size_bytes)
+            elif sort_mode == "mtime":
+                entries = sorted(entries, key=lambda e: -e.mtime)
+            else:
+                entries = sorted(entries, key=lambda e: e.rel.lower())
+            out: list[tuple[str, str]] = []
             for e in entries:
-                mb = round(e.size_bytes / (1024 * 1024), 2)
+                mb = e.size_bytes / (1024 * 1024)
                 try:
                     dt = datetime.fromtimestamp(e.mtime).strftime("%Y-%m-%d %H:%M")
                 except (OverflowError, ValueError):
                     dt = ""
-                rows.append([
-                    "✓" if e.already_imported else "",
-                    e.rel,
-                    mb,
-                    dt,
-                ])
-            return rows
+                mark = "✓ " if e.already_imported else "○ "
+                label = f"{mark}{e.rel}  ({mb:.1f} MB, {dt})"
+                out.append((label, e.path))
+            return out
 
-        def _on_scan(path: str):
+        def _on_scan(path: str, sort_mode: str):
             if not path:
                 return (
-                    gr.update(value=[]),
+                    gr.update(choices=[], value=[]),
                     [],
-                    None,
-                    gr.update(value="", visible=False),
                     gr.update(value="_パスを入力してください_", visible=True),
                 )
             entries = list_videos_under(path, media_root=str(media_dir))
             if not entries:
                 return (
-                    gr.update(value=[]),
+                    gr.update(choices=[], value=[]),
                     [],
-                    None,
-                    gr.update(value="", visible=False),
                     gr.update(value=f"`{path}` の下に動画が見つかりませんでした。", visible=True),
                 )
             duplicate_count = sum(1 for e in entries if e.already_imported)
             msg = f"**{len(entries)}** 件見つかりました"
             if duplicate_count:
-                msg += f"（うち **{duplicate_count}** 件は取込済または変換済 ✓）"
-            msg += "。行をクリックして追加するファイルを選択してください。"
+                msg += f"（うち **{duplicate_count}** 件は取込済 / 変換済 ✓）"
             return (
-                gr.update(value=_entries_to_df(entries)),
+                gr.update(choices=_entries_to_choices(entries, sort_mode), value=[]),
                 list(entries),
-                None,
-                gr.update(value="", visible=False),
                 gr.update(value=msg, visible=True),
             )
 
         scan_btn.click(
             _on_scan,
-            inputs=browse_path,
-            outputs=[file_picker, entries_state, selected_path_state, selected_label, browse_msg],
+            inputs=[browse_path, sort_by],
+            outputs=[file_picker, entries_state, browse_msg],
         )
 
-        def _on_row_select(entries, evt: gr.SelectData):
-            """Dataframe 行クリック → entries_state から該当行のパスを selected_path_state へ。"""
-            if not entries or evt.index is None:
-                return None, gr.update(value="", visible=False)
-            row_idx = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
-            if not (0 <= row_idx < len(entries)):
-                return None, gr.update(value="", visible=False)
-            e = entries[row_idx]
-            warn = "  ⚠️ 重複（取込済または変換済）— 上書きチェックが必要" if e.already_imported else ""
-            return e.path, gr.update(
-                value=f"選択中: `{e.rel}`{warn}",
-                visible=True,
-            )
+        def _on_sort_change(entries, sort_mode):
+            if not entries:
+                return gr.update(choices=[], value=[])
+            return gr.update(choices=_entries_to_choices(entries, sort_mode), value=[])
 
-        file_picker.select(
-            _on_row_select,
-            inputs=entries_state,
-            outputs=[selected_path_state, selected_label],
+        sort_by.change(
+            _on_sort_change,
+            inputs=[entries_state, sort_by],
+            outputs=file_picker,
         )
 
-        def _on_convert_from_drive(src_path):
-            """行選択 → ローカルにステージ → 変換投入。
+        def _on_select_all(entries, sort_mode):
+            if not entries:
+                return gr.update(value=[])
+            choices = _entries_to_choices(entries, sort_mode)
+            return gr.update(value=[v for _, v in choices])
 
-            `media/source/` には一切触れない。ステージングは /tmp（Colab ローカル）。
-            """
-            if not src_path:
-                return (
-                    gr.update(value="⚠️ 行を選択してから押してください", visible=True),
-                    _load_sources(media_dir, registry),
-                    gr.update(active=False),
-                )
+        select_all_btn.click(
+            _on_select_all, inputs=[entries_state, sort_by], outputs=file_picker,
+        )
+        clear_sel_btn.click(lambda: gr.update(value=[]), outputs=file_picker)
+
+        def _on_queue(selected_paths: list[str]):
+            """選択した複数ファイルを順番にステージ＋キュー投入。"""
             from pathlib import Path as _P
-            src = _P(src_path)
-            vid = resolve_video_id(src.name)
-
-            # 既に変換済み / アクティブジョブありならここで弾く
-            if registry.find_active_by_video_id(vid):
+            if not selected_paths:
                 return (
-                    gr.update(value=f"⚠️ {src.name} は既に変換キューに入っています", visible=True),
-                    _load_sources(media_dir, registry),
-                    gr.update(active=True),
-                )
-            if (media_dir / "hls" / vid / "master.m3u8").exists():
-                return (
-                    gr.update(value=f"⚠️ {src.name} は既に変換済みです（動画一覧の 🗑 で削除してから再変換可能）", visible=True),
+                    gr.update(value="⚠️ ファイルを選択してから押してください", visible=True),
                     _load_sources(media_dir, registry),
                     gr.update(active=False),
                 )
 
-            # 1) Drive → Colab ローカルへコピー
-            stage_res = stage_to_local(src_path, str(staging_dir()))
-            if not stage_res["ok"]:
-                return (
-                    gr.update(value=f"⚠️ {stage_res['message']}", visible=True),
-                    _load_sources(media_dir, registry),
-                    gr.update(active=False),
-                )
-            staged_path = stage_res["path"]
+            queued: list[str] = []
+            skipped: list[str] = []
+            failed: list[str] = []
 
-            # 2) 変換ジョブ投入（source_path にローカル staged を渡す）
-            try:
-                registry.submit(
-                    runner=lambda reg, job_id, _sp=staged_path, _name=src.name, _vid=vid: run_conversion(
-                        registry=reg, job_id=job_id,
-                        media_root=str(media_dir),
-                        source_file=_name, video_id=_vid,
-                        source_path=_sp,
-                        cleanup_source_after=True,
-                    ),
-                    video_id=vid,
-                    source_file=src.name,
-                )
-            except ValueError as e:
-                return (
-                    gr.update(value=f"⚠️ ジョブ投入失敗: {e}", visible=True),
-                    _load_sources(media_dir, registry),
-                    gr.update(active=False),
-                )
+            for src_path in selected_paths:
+                src = _P(src_path)
+                vid = resolve_video_id(src.name)
 
+                # 既に変換済み or キュー内なら skip
+                if registry.find_active_by_video_id(vid):
+                    skipped.append(f"{src.name}（キュー内）")
+                    continue
+                if (media_dir / "hls" / vid / "master.m3u8").exists():
+                    skipped.append(f"{src.name}（変換済）")
+                    continue
+                # ローカル staging（shutil.copy2 がここで走る。大ファイルだとブロックする点に注意）
+                stage_res = stage_to_local(src_path, str(staging_dir()))
+                if not stage_res["ok"]:
+                    failed.append(f"{src.name}: {stage_res['message']}")
+                    continue
+                staged_path = stage_res["path"]
+                try:
+                    registry.submit(
+                        runner=lambda reg, job_id, _sp=staged_path, _name=src.name, _vid=vid: run_conversion(
+                            registry=reg, job_id=job_id,
+                            media_root=str(media_dir),
+                            source_file=_name, video_id=_vid,
+                            source_path=_sp,
+                            cleanup_source_after=True,
+                        ),
+                        video_id=vid,
+                        source_file=src.name,
+                    )
+                    queued.append(src.name)
+                except ValueError as e:
+                    failed.append(f"{src.name}: {e}")
+
+            parts: list[str] = []
+            if queued:
+                parts.append(f"✅ **{len(queued)}** 件キュー投入: {', '.join(queued[:5])}"
+                             + (f" ... 他{len(queued) - 5}件" if len(queued) > 5 else ""))
+            if skipped:
+                parts.append(f"⏭ **{len(skipped)}** 件スキップ: {', '.join(skipped[:5])}"
+                             + (f" ... 他{len(skipped) - 5}件" if len(skipped) > 5 else ""))
+            if failed:
+                parts.append(f"⚠️ **{len(failed)}** 件失敗: {'; '.join(failed[:3])}")
+
+            msg = " / ".join(parts) if parts else "(何も起きませんでした)"
             sources = _load_sources(media_dir, registry)
+            any_active = any(s.get("active_job_id") for s in sources)
             return (
-                gr.update(
-                    value=f"✅ {src.name}: {stage_res['message']} → 変換を開始しました。動画一覧で進捗を確認できます。",
-                    visible=True,
-                ),
+                gr.update(value=msg, visible=True),
                 sources,
-                gr.update(active=True),
+                gr.update(active=any_active),
             )
 
         convert_btn.click(
-            _on_convert_from_drive,
-            inputs=selected_path_state,
+            _on_queue,
+            inputs=file_picker,
             outputs=[browse_msg, sources_state, poll_timer],
         )
 
