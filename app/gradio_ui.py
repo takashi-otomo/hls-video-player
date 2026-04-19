@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import html
+import logging
 import os
 import shutil
 from pathlib import Path
 from typing import Generator
 
 import gradio as gr
+
+_ui_logger = logging.getLogger(__name__)
 
 from hls_video.config import max_concurrent_jobs, media_root, staging_dir
 from hls_video.conversion_runner import run_conversion
@@ -69,16 +72,34 @@ _CSS = """
 # ---------------------------------------------------------------------------
 
 def _load_sources(media_dir: Path, registry: JobRegistry) -> list[dict]:
+    """動画一覧 UI に渡す sources を作る。
+
+    各行に `job_snapshot` と `_tick_at` を埋め込むことが重要:
+      - Gradio の `gr.State` / `@gr.render` は入力値が「変わった」ときだけ
+        再描画する。`sources` dict が毎 tick 同じ内容に見えると、
+        バックエンドで job.progress が更新されていても UI が動かない。
+      - snapshot() は progress / stage / last_progress_at を含むので、
+        変換中は毎 tick 値が変わる。
+      - さらに保険として `_tick_at` を増やし、どのポーリングでも必ず
+        「値が違う」と Gradio に認識させる。
+    """
+    import time as _time
+    tick = _time.time()
     sources = list_sources(str(media_dir))
     seen_vids: set[str] = set()
     for s in sources:
         active = registry.find_active_by_video_id(s["video_id"])
-        s["active_job_id"] = active.id if active else None
+        if active:
+            s["active_job_id"] = active.id
+            s["job_snapshot"] = active.snapshot()
+        else:
+            s["active_job_id"] = None
+            s["job_snapshot"] = None
+        s["_tick_at"] = tick
         seen_vids.add(s["video_id"])
 
     # Drive ステージ経由の変換のように、source/ にも hls/ にもまだファイルが
-    # 存在しないが pending/running のジョブがある場合の行をここで合成。
-    # 変換開始ボタンを押した瞬間から UI に出るようにする。
+    # 存在しない pending/running ジョブの仮想行を合成。
     for job in registry.list():
         if job.state not in ("pending", "running"):
             continue
@@ -93,6 +114,8 @@ def _load_sources(media_dir: Path, registry: JobRegistry) -> list[dict]:
             "sprite": None,
             "source_deleted": True,   # ローカル実体なし扱い（サイズ欄に "—"）
             "active_job_id": job.id,
+            "job_snapshot": job.snapshot(),
+            "_tick_at": tick,
         })
 
     return sorted(sources, key=lambda r: r["filename"])
@@ -297,7 +320,18 @@ def build_ui(
         def _refresh():
             sources = _load_sources(media_dir, registry)
             any_active = any(s.get("active_job_id") for s in sources)
-            # Timer はジョブ中だけアクティブ
+            # Colab でトンネル経由の Timer 挙動が怪しいときの切り分け用。
+            # アクティブなジョブがある間だけ INFO に上げる（進行中しか UI 更新が
+            # 重要ではないので、アイドル時のノイズは DEBUG に抑える）。
+            level = logging.INFO if any_active else logging.DEBUG
+            snapshots = [
+                (s.get("video_id"),
+                 (s.get("job_snapshot") or {}).get("stage"),
+                 round((s.get("job_snapshot") or {}).get("progress") or 0, 3))
+                for s in sources if s.get("active_job_id")
+            ]
+            _ui_logger.log(level, "UI refresh: %d sources, active=%s %s",
+                           len(sources), any_active, snapshots)
             return sources, gr.update(active=any_active)
 
         demo.load(_refresh, outputs=[sources_state, poll_timer])
