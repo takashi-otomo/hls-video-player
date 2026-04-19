@@ -16,7 +16,9 @@ _ui_logger = logging.getLogger(__name__)
 
 from hls_video.config import max_concurrent_jobs, media_root, staging_dir
 from hls_video.conversion_runner import run_conversion
-from hls_video.drive_browser import import_file, list_videos_under, stage_to_local
+from hls_video.drive_browser import (
+    import_file, list_pending_staging, list_videos_under, stage_to_local,
+)
 from hls_video.job_registry import Job, JobRegistry
 from hls_video.logging_setup import setup_logging
 from hls_video.source_catalog import (
@@ -117,6 +119,30 @@ def _load_sources(media_dir: Path, registry: JobRegistry) -> list[dict]:
             "job_snapshot": job.snapshot(),
             "_tick_at": tick,
         })
+        seen_vids.add(job.video_id)
+
+    # ランタイム再起動などで JobRegistry が失われたが、Colab ローカル SSD の
+    # staging 領域にはまだファイルが残っているケースを「再開待ち」として
+    # 合成する。hls/<id>/master.m3u8 が存在しないもののみ対象。
+    for p in list_pending_staging(str(staging_dir()), str(media_dir)):
+        if p["video_id"] in seen_vids:
+            continue
+        from datetime import datetime as _dt, timezone as _tz
+        sources.append({
+            "filename": p["filename"],
+            "video_id": p["video_id"],
+            "size_bytes": p["size_bytes"],
+            "modified_at": _dt.fromtimestamp(p["mtime"], tz=_tz.utc).isoformat(),
+            "converted": False,
+            "sprite": None,
+            "source_deleted": False,
+            "active_job_id": None,
+            "job_snapshot": None,
+            "pending_staging": True,
+            "staged_path": p["path"],
+            "_tick_at": tick,
+        })
+        seen_vids.add(p["video_id"])
 
     return sorted(sources, key=lambda r: r["filename"])
 
@@ -176,6 +202,9 @@ def _status_badge(source: dict, job: Job | None) -> str:
         if source.get("source_deleted"):
             return '<span style="color:#7fd498">✓ 変換済</span> <span style="color:#8b93a1;font-size:0.75rem">(MP4 削除済)</span>'
         return '<span style="color:#7fd498">✓ 変換済</span>'
+    if source.get("pending_staging"):
+        return ('<span style="color:#6fd0ff">▶ 再開待ち</span>'
+                ' <span style="color:#8b93a1;font-size:0.75rem">(ローカル staging にあり)</span>')
     return '<span style="color:#f0c47a">未変換</span>'
 
 
@@ -649,6 +678,38 @@ def _make_action_button(source, job, registry, sources_state, playing_state, pla
                 any_active = any(s.get("active_job_id") for s in sources)
                 return sources, gr.update(active=any_active)
             delete_btn.click(_do_delete, outputs=[sources_state, poll_timer])
+        return
+
+    # ランタイム再起動後の再開待ち (staging に残存) → 再開ボタン
+    if source.get("pending_staging"):
+        resume_btn = gr.Button("▶ 再開", variant="primary", size="sm")
+
+        def _do_resume(
+            filename=source["filename"],
+            vid=source["video_id"],
+            staged=source["staged_path"],
+        ):
+            if registry.find_active_by_video_id(vid) is None:
+                try:
+                    registry.submit(
+                        runner=lambda reg, job_id, _sp=staged, _name=filename, _vid=vid:
+                        run_conversion(
+                            registry=reg, job_id=job_id,
+                            media_root=str(media_dir),
+                            source_file=_name, video_id=_vid,
+                            source_path=_sp,
+                            # cleanup_source_after は自動で True に解決される
+                        ),
+                        video_id=vid,
+                        source_file=filename,
+                    )
+                except ValueError:
+                    pass
+            sources = _load_sources(media_dir, registry)
+            any_active = any(s.get("active_job_id") for s in sources)
+            return sources, gr.update(active=any_active)
+
+        resume_btn.click(_do_resume, outputs=[sources_state, poll_timer])
         return
 
     # 未変換なら変換ボタン

@@ -7,6 +7,7 @@ import pytest
 
 from hls_video.drive_browser import (
     BrowseEntry,
+    list_pending_staging,
     list_videos_under,
     import_file,
     purge_stale_staging,
@@ -221,6 +222,67 @@ class TestStageToLocal:
         src.write_text("")
         res = stage_to_local(str(src), str(tmp_path / "stage"))
         assert res["ok"] is False
+
+
+class TestListPendingStaging:
+    """staging にあるが変換未完了のファイルを再開待ちとして列挙する。"""
+
+    def test_returns_empty_when_staging_missing(self, tmp_path):
+        assert list_pending_staging(
+            str(tmp_path / "nope"), str(tmp_path / "media")
+        ) == []
+
+    def test_lists_video_without_hls_output(self, tmp_path):
+        staging = tmp_path / "stage"
+        staging.mkdir()
+        (staging / "abc.mp4").write_bytes(b"X")
+        media = tmp_path / "media"
+        (media / "hls").mkdir(parents=True)
+        # hls/abc/master.m3u8 は無い → pending として返る
+
+        result = list_pending_staging(str(staging), str(media))
+        assert len(result) == 1
+        assert result[0]["filename"] == "abc.mp4"
+        assert result[0]["video_id"] == "abc"
+        assert result[0]["size_bytes"] == 1
+        assert result[0]["path"].endswith("abc.mp4")
+
+    def test_skips_when_hls_master_exists(self, tmp_path):
+        """変換完了済み (master.m3u8 あり) は返さない。"""
+        staging = tmp_path / "stage"
+        staging.mkdir()
+        (staging / "done.mp4").write_bytes(b"X")
+        media = tmp_path / "media"
+        (media / "hls" / "done").mkdir(parents=True)
+        (media / "hls" / "done" / "master.m3u8").write_text("#EXTM3U\n")
+
+        assert list_pending_staging(str(staging), str(media)) == []
+
+    def test_ignores_non_video_files(self, tmp_path):
+        staging = tmp_path / "stage"
+        staging.mkdir()
+        (staging / "notes.txt").write_text("ignore")
+        (staging / "movie.mp4").write_bytes(b"Z")
+        media = tmp_path / "media"
+
+        result = list_pending_staging(str(staging), str(media))
+        names = [r["filename"] for r in result]
+        assert names == ["movie.mp4"]
+
+    def test_multiple_sorted_by_mtime_desc(self, tmp_path):
+        import time as _time
+        staging = tmp_path / "stage"
+        staging.mkdir()
+        old = staging / "old.mp4"
+        old.write_bytes(b"1")
+        old_time = _time.time() - 300
+        os.utime(old, (old_time, old_time))
+        new = staging / "new.mp4"
+        new.write_bytes(b"2")
+
+        result = list_pending_staging(str(staging), str(tmp_path / "media"))
+        names = [r["filename"] for r in result]
+        assert names == ["new.mp4", "old.mp4"]  # 新しい順
 
 
 class TestPurgeStaleStaging:

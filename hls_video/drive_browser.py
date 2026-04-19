@@ -159,6 +159,48 @@ def import_file(src_path: str, media_root: str, *, overwrite: bool = False) -> d
 import_as_symlink = import_file
 
 
+def list_pending_staging(staging_dir: str, media_root: str) -> list[dict]:
+    """ステージング領域に残っているが変換が完了していない動画を列挙する。
+
+    ランタイム再起動や uvicorn 再起動で JobRegistry (オンメモリ) が失われた後でも、
+    Colab ローカル SSD の `/tmp/hls-staging/<name>.mp4` は残っている。それを
+    UI の「再開待ち」一覧として拾う。
+
+    判定:
+    - staging 配下の `.mp4/.mov/.mkv/.webm`
+    - かつ `media/hls/<video_id>/master.m3u8` が存在しない (= 変換未完了)
+
+    戻り値の要素: {filename, video_id, size_bytes, mtime, path}
+    """
+    staging = Path(staging_dir)
+    if not staging.is_dir():
+        return []
+    hls_root = Path(media_root) / "hls"
+    results: list[dict] = []
+    for entry in staging.iterdir():
+        if not entry.is_file():
+            continue
+        if entry.suffix.lower() not in VIDEO_EXTS:
+            continue
+        vid = resolve_video_id(entry.name)
+        if (hls_root / vid / "master.m3u8").exists():
+            # 変換完了済み。掃除は purge_stale_staging 任せ（1h 閾値）
+            continue
+        try:
+            stat = entry.stat()
+        except OSError:
+            continue
+        results.append({
+            "filename": entry.name,
+            "video_id": vid,
+            "size_bytes": stat.st_size,
+            "mtime": stat.st_mtime,
+            "path": str(entry.resolve()),
+        })
+    # 新しい順で返す（UI は最終的に filename でソートし直すが内部整列は有用）
+    return sorted(results, key=lambda r: r["mtime"], reverse=True)
+
+
 def purge_stale_staging(staging_dir: str, *, older_than_seconds: int = 3600) -> int:
     """ステージング領域で N 秒以上前にコピーされた孤児ファイルを削除する。
 
