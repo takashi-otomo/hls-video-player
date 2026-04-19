@@ -24,21 +24,47 @@ def player_page_html(video_id: str) -> str:
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>{safe_id}</title>
 <link href="https://vjs.zencdn.net/{_VIDEOJS_VERSION}/video-js.css" rel="stylesheet">
 <link href="/static/player.css" rel="stylesheet">
 <style>
-  html, body {{ margin: 0; padding: 0; background: #000; color: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}
-  .wrap {{ max-width: 100%; }}
-  /* トップバー（/play からリンクで来た / 直接 URL で開いた時のみ表示。
-     Gradio 内の iframe 埋込では親側の「▼ 閉じる」があるので非表示にする。） */
+  html, body {{
+    margin: 0; padding: 0; background: #000; color: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    height: 100%;
+    overflow: hidden;
+  }}
+  #root {{
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    height: 100dvh;        /* iOS Safari のバー高さ補正 */
+  }}
+  .wrap {{
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+  }}
+  #mount {{
+    width: 100%;
+    max-width: 1280px;
+  }}
+
+  /* トップバー（直接アクセス / /play 経由の時だけ表示） */
   .topbar {{
     display: none;
     align-items: center; gap: 0.5rem;
     padding: 0.5rem 0.75rem; background: #0a0c10;
     border-bottom: 1px solid #272c36;
-    position: sticky; top: 0; z-index: 5;
+    flex-shrink: 0;
+    /* iOS Safari のノッチ対応 */
+    padding-top: calc(0.5rem + env(safe-area-inset-top));
+    padding-left: calc(0.75rem + env(safe-area-inset-left));
+    padding-right: calc(0.75rem + env(safe-area-inset-right));
   }}
   .topbar.show {{ display: flex; }}
   .topbar a.back {{
@@ -54,23 +80,61 @@ def player_page_html(video_id: str) -> str:
     font-family: "SF Mono", Menlo, monospace;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }}
+
+  /* スマホ横置き: 画面いっぱいに動画を出すためにトップバーを半透明オーバーレイ化 */
+  @media (orientation: landscape) and (max-height: 520px) {{
+    .topbar.show {{
+      position: fixed;
+      top: 0; left: 0; right: auto;
+      padding: 0.35rem 0.5rem;
+      padding-top: calc(0.35rem + env(safe-area-inset-top));
+      padding-left: calc(0.5rem + env(safe-area-inset-left));
+      background: rgba(10, 12, 16, 0.55);
+      border: none; border-bottom-right-radius: 8px;
+      z-index: 10;
+      transition: opacity 0.2s;
+      opacity: 0.75;
+    }}
+    .topbar.show:hover {{ opacity: 1; }}
+    .topbar.show .title {{ display: none; }}     /* 横置きは尺優先でタイトル非表示 */
+    .topbar.show a.back {{
+      padding: 0.22rem 0.55rem; font-size: 0.78rem;
+      background: rgba(26, 29, 36, 0.9);
+    }}
+    #mount {{ max-width: 100%; height: 100%; }}  /* Video.js が 16:9 枠で最大化 */
+    .wrap {{ padding: 0; }}
+  }}
+
+  /* 大画面では中央寄せ + 余白 */
+  @media (min-width: 900px) and (min-height: 600px) {{
+    .wrap {{ padding: 1rem; }}
+  }}
+
+  /* Video.js 側を container フィットに（aspectRatio:'16:9' と協調） */
+  #mount .video-js {{ width: 100%; height: auto; max-height: 100%; }}
 </style>
 </head>
 <body>
-<div class="topbar" id="topbar">
-  <a class="back" href="/play">← 一覧</a>
-  <span class="title">{safe_id}</span>
+<div id="root">
+  <div class="topbar" id="topbar">
+    <a class="back" href="/play">← 一覧</a>
+    <span class="title">{safe_id}</span>
+  </div>
+  <div class="wrap"><div id="mount"></div></div>
 </div>
-<div class="wrap"><div id="mount"></div></div>
 <script src="https://vjs.zencdn.net/{_VIDEOJS_VERSION}/video.min.js"></script>
 <script src="/static/playerFactory.js"></script>
 <script>
-  // iframe 内（Gradio 動画一覧の埋込再生）では非表示。
-  // 直接 /player/<id> を開いた場合 / /play から遷移した場合だけ戻るリンクを見せる。
+  // iframe 内（Gradio 動画一覧の埋込再生）ではトップバー非表示。
   if (window.top === window.self) {{
     document.getElementById('topbar').classList.add('show');
   }}
   window.HlsPlayer.init(document.getElementById("mount"), "{safe_id}");
+
+  // モバイル横置きの変化でリサイズを促す（address bar の伸縮で 100dvh が変わる）
+  window.addEventListener('orientationchange', () => {{
+    setTimeout(() => window.dispatchEvent(new Event('resize')), 150);
+  }});
 </script>
 </body>
 </html>"""
