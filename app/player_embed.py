@@ -29,15 +29,47 @@ def player_page_html(video_id: str) -> str:
 <link href="https://vjs.zencdn.net/{_VIDEOJS_VERSION}/video-js.css" rel="stylesheet">
 <link href="/static/player.css" rel="stylesheet">
 <style>
-  html, body {{ margin: 0; padding: 0; background: #000; color: #fff; font-family: sans-serif; }}
+  html, body {{ margin: 0; padding: 0; background: #000; color: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}
   .wrap {{ max-width: 100%; }}
+  /* トップバー（/play からリンクで来た / 直接 URL で開いた時のみ表示。
+     Gradio 内の iframe 埋込では親側の「▼ 閉じる」があるので非表示にする。） */
+  .topbar {{
+    display: none;
+    align-items: center; gap: 0.5rem;
+    padding: 0.5rem 0.75rem; background: #0a0c10;
+    border-bottom: 1px solid #272c36;
+    position: sticky; top: 0; z-index: 5;
+  }}
+  .topbar.show {{ display: flex; }}
+  .topbar a.back {{
+    color: #4aa8ff; text-decoration: none;
+    font-size: 0.9rem; padding: 0.35rem 0.7rem;
+    border: 1px solid #272c36; border-radius: 4px;
+    background: #1a1d24;
+    white-space: nowrap;
+  }}
+  .topbar a.back:hover {{ border-color: #4aa8ff; background: #22262f; }}
+  .topbar .title {{
+    color: #e6e8eb; flex: 1; font-size: 0.85rem;
+    font-family: "SF Mono", Menlo, monospace;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }}
 </style>
 </head>
 <body>
+<div class="topbar" id="topbar">
+  <a class="back" href="/play">← 一覧</a>
+  <span class="title">{safe_id}</span>
+</div>
 <div class="wrap"><div id="mount"></div></div>
 <script src="https://vjs.zencdn.net/{_VIDEOJS_VERSION}/video.min.js"></script>
 <script src="/static/playerFactory.js"></script>
 <script>
+  // iframe 内（Gradio 動画一覧の埋込再生）では非表示。
+  // 直接 /player/<id> を開いた場合 / /play から遷移した場合だけ戻るリンクを見せる。
+  if (window.top === window.self) {{
+    document.getElementById('topbar').classList.add('show');
+  }}
   window.HlsPlayer.init(document.getElementById("mount"), "{safe_id}");
 </script>
 </body>
