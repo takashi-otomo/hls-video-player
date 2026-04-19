@@ -6,6 +6,15 @@ npm-debug.log*
 coverage/
 .claude/
 
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.egg-info/
+build/
+dist/
+
 # Generated media assets — commit only README placeholders
 media/source/*
 media/hls/*
