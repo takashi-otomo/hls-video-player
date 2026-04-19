@@ -13,7 +13,7 @@ import gradio as gr
 
 from hls_video.config import max_concurrent_jobs, media_root
 from hls_video.conversion_runner import run_conversion
-from hls_video.drive_browser import import_as_symlink, list_videos_under
+from hls_video.drive_browser import import_file, list_videos_under
 from hls_video.job_registry import Job, JobRegistry
 from hls_video.source_catalog import list_sources, resolve_video_id, VIDEO_EXTS
 
@@ -154,8 +154,7 @@ def build_ui(
                     with gr.Tab("Drive / サーバから追加"):
                         gr.Markdown(
                             "指定したディレクトリ配下の `.mp4 / .mov / .mkv / .webm` を走査し、"
-                            "選んだファイルを `media/source/` に **シンボリックリンク** として取り込みます "
-                            "（ファイル本体はコピーせず、元の場所に置いたまま参照）。"
+                            "選んだファイルを `media/source/` に **コピー** して取り込みます。"
                         )
                         with gr.Row():
                             browse_path = gr.Textbox(
@@ -164,11 +163,13 @@ def build_ui(
                                 scale=4,
                             )
                             scan_btn = gr.Button("🔍 走査", scale=1)
-                        file_picker = gr.Dropdown(
-                            choices=[], label="見つかった動画ファイル", interactive=True,
+                        file_picker = gr.Radio(
+                            choices=[],
+                            label="見つかった動画ファイル（1 件選択）",
+                            interactive=True,
                         )
                         with gr.Row():
-                            import_btn = gr.Button("＋ 追加（リンク）", variant="primary")
+                            import_btn = gr.Button("＋ 追加（コピー）", variant="primary")
                             import_overwrite = gr.Checkbox(
                                 value=False, label="同名ファイルを上書き",
                             )
@@ -263,7 +264,7 @@ def build_ui(
             if not src_path:
                 return gr.update(value="ファイルを選択してください", visible=True), \
                        _load_sources(media_dir, registry), gr.update(active=False)
-            res = import_as_symlink(src_path, str(media_dir), overwrite=overwrite)
+            res = import_file(src_path, str(media_dir), overwrite=overwrite)
             sources = _load_sources(media_dir, registry)
             any_active = any(s.get("active_job_id") for s in sources)
             icon = "✅" if res["ok"] else "⚠️"

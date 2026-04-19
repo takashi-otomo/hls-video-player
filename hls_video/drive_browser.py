@@ -1,15 +1,18 @@
 """Google Drive（もしくは任意のローカルパス）配下にある動画ファイルを走査して、
-`media/source/` にシンボリックリンクで取り込むヘルパ。
+`media/source/` にコピーで取り込むヘルパ。
 
 Colab + Drive mount 環境では、ユーザーの動画は既に `/content/drive/MyDrive/...`
 に存在している。ファイル選択ダイアログ（ブラウザアップロード）を使うと
 一度 PC を経由してしまい非効率。本モジュールは Drive のパスを直接参照し、
-symlink 経由で取り込むことで転送を回避する。
+`media/source/` にコピー取り込みすることでブラウザ往復を回避する。
+
+※ Drive FUSE は symlink を拒否する (Errno 95 Operation not supported) ため、
+   実コピーで統一する。
 """
 
 from __future__ import annotations
 
-import os
+import shutil
 from pathlib import Path
 from typing import NamedTuple
 
@@ -17,8 +20,8 @@ from hls_video.source_catalog import VIDEO_EXTS
 
 
 class BrowseEntry(NamedTuple):
-    path: str      # 絶対パス
-    rel: str       # ブラウズルートからの相対パス（UI 表示用）
+    path: str       # 絶対パス
+    rel: str        # ブラウズルートからの相対パス（UI 表示用）
     size_bytes: int
 
 
@@ -66,8 +69,11 @@ def list_videos_under(root: str, *, max_depth: int = 3) -> list[BrowseEntry]:
     return results
 
 
-def import_as_symlink(src_path: str, media_root: str, *, overwrite: bool = False) -> dict:
-    """任意のパスにある動画ファイルを `media/source/` にシンボリックリンクで取り込む。
+def import_file(src_path: str, media_root: str, *, overwrite: bool = False) -> dict:
+    """任意のパスにある動画ファイルを `media/source/` にコピー取り込み。
+
+    Drive FUSE は symlink を受け付けないため実コピーで統一。
+    large file を想定して `shutil.copy2` (メタデータ保持) を使う。
 
     戻り値 dict:
       - ok (bool)
@@ -92,11 +98,19 @@ def import_as_symlink(src_path: str, media_root: str, *, overwrite: bool = False
         if not overwrite:
             return {
                 "ok": False,
-                "message": f"既に {src.name} が media/source/ にあります（上書きするには overwrite=True）",
+                "message": f"既に {src.name} が media/source/ にあります（overwrite=True で上書き）",
                 "filename": src.name,
             }
         if dst.is_symlink() or dst.is_file():
             dst.unlink()
 
-    os.symlink(src.resolve(), dst)
-    return {"ok": True, "message": f"{src.name} を追加しました（シンボリックリンク）", "filename": src.name}
+    shutil.copy2(str(src.resolve()), str(dst))
+    return {
+        "ok": True,
+        "message": f"{src.name} を media/source/ にコピーしました",
+        "filename": src.name,
+    }
+
+
+# 後方互換のために旧名を残すが、新規コードは import_file を使うこと
+import_as_symlink = import_file

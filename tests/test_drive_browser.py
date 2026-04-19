@@ -1,4 +1,4 @@
-"""Drive ブラウズ & シンボリックリンク取り込みのテスト。"""
+"""Drive ブラウズ & ファイル取り込みのテスト。"""
 
 import os
 from pathlib import Path
@@ -8,7 +8,7 @@ import pytest
 from hls_video.drive_browser import (
     BrowseEntry,
     list_videos_under,
-    import_as_symlink,
+    import_file,
 )
 
 
@@ -40,7 +40,6 @@ class TestListVideosUnder:
             p = p / f"d{i}"
             p.mkdir()
         (p / "deep.mp4").write_bytes(b"")
-        # 浅い deep 制限ではヒットしない
         shallow = list_videos_under(str(tmp_path), max_depth=2)
         assert shallow == []
         deep = list_videos_under(str(tmp_path), max_depth=10)
@@ -62,35 +61,37 @@ class TestListVideosUnder:
         (real / "hidden.mp4").write_bytes(b"")
         link = tmp_path / "link_to_real"
         os.symlink(real, link)
-        # ベース直下の link_to_real は symlink で無視、real/hidden.mp4 は正規で拾われる
         result = list_videos_under(str(tmp_path))
         rels = [e.rel for e in result]
         assert rels == ["real/hidden.mp4"]
 
 
-class TestImportAsSymlink:
-    def test_creates_symlink_in_media_source(self, tmp_path):
+class TestImportFile:
+    def test_copies_to_media_source(self, tmp_path):
         media = tmp_path / "media"
         src = tmp_path / "drive" / "movie.mp4"
         src.parent.mkdir()
         src.write_bytes(b"DATA")
 
-        result = import_as_symlink(str(src), str(media))
+        result = import_file(str(src), str(media))
         assert result["ok"] is True
-        link = media / "source" / "movie.mp4"
-        assert link.is_symlink()
-        assert link.read_bytes() == b"DATA"  # シンボリック経由で実体を読めること
-        assert os.readlink(link) == str(src.resolve())
+        assert "コピー" in result["message"]
+        dst = media / "source" / "movie.mp4"
+        assert dst.is_file()
+        assert not dst.is_symlink()
+        assert dst.read_bytes() == b"DATA"
+        # 元ファイルは変更されない
+        assert src.read_bytes() == b"DATA"
 
     def test_rejects_missing_file(self, tmp_path):
-        result = import_as_symlink(str(tmp_path / "nope.mp4"), str(tmp_path))
+        result = import_file(str(tmp_path / "nope.mp4"), str(tmp_path))
         assert result["ok"] is False
         assert "見つかりません" in result["message"]
 
     def test_rejects_non_video_extension(self, tmp_path):
         src = tmp_path / "doc.txt"
         src.write_text("")
-        result = import_as_symlink(str(src), str(tmp_path))
+        result = import_file(str(src), str(tmp_path))
         assert result["ok"] is False
         assert "拡張子" in result["message"]
 
@@ -103,9 +104,11 @@ class TestImportAsSymlink:
         src.parent.mkdir()
         src.write_bytes(b"new")
 
-        result = import_as_symlink(str(src), str(media))
+        result = import_file(str(src), str(media))
         assert result["ok"] is False
         assert "既に" in result["message"]
+        # 既存ファイルは変更されない
+        assert (media / "source" / "movie.mp4").read_bytes() == b"existing"
 
     def test_overwrites_when_allowed(self, tmp_path):
         media = tmp_path / "media"
@@ -116,6 +119,8 @@ class TestImportAsSymlink:
         src.parent.mkdir()
         src.write_bytes(b"new")
 
-        result = import_as_symlink(str(src), str(media), overwrite=True)
+        result = import_file(str(src), str(media), overwrite=True)
         assert result["ok"] is True
-        assert (media / "source" / "movie.mp4").is_symlink()
+        dst = media / "source" / "movie.mp4"
+        assert dst.is_file()
+        assert dst.read_bytes() == b"new"
