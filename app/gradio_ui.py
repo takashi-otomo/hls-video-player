@@ -168,7 +168,10 @@ def build_ui(
                         file_picker = gr.Dataframe(
                             headers=["取込済", "ファイル名", "サイズ(MB)", "更新日時"],
                             datatype=["str", "str", "number", "str"],
-                            column_count=(4, "fixed"),
+                            # col_count は古い Gradio 互換の名前。新しい Gradio では
+                            # deprecation warning が出るが column_count で動く。
+                            # Colab 側 (~5.x) との互換のためこちらを使用。
+                            col_count=(4, "fixed"),
                             row_count=(0, "dynamic"),
                             interactive=False,
                             wrap=True,
