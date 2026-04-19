@@ -174,7 +174,7 @@ def _nvenc_variant_output_args(
     segment_seconds: int,
     gop: int,
     preset: str,
-    bframes: int,
+    bframes: Optional[int],
 ) -> list[str]:
     """NVENC (h264_nvenc) の 1 variant 分。
 
@@ -182,12 +182,12 @@ def _nvenc_variant_output_args(
     近い体感画質にマップ: CRF そのまま CQ に使うと libx264 よりやや低画質側に寄るが、
     HLS 配信品質としては十分許容範囲。
 
-    `bframes=0` で B-frames を無効化すると NVENC パイプラインの並列度が上がり
-    5-15% 高速化（圧縮効率は 5-10% 悪化、ビットレート指定下では影響微小）。
+    bframes=None のときは `-bf` を付けず NVENC のデフォルトに任せる (推奨)。
+    bframes=0 を明示すると B-frames 無効化で速度優先になるが、圧縮効率は悪化。
     """
     playlist = os.path.join(out_dir, f"{variant['name']}.m3u8")
     seg_pattern = os.path.join(out_dir, f"{variant['name']}_%03d.ts")
-    return [
+    args = [
         "-map", map_label,
         "-map", "0:a:0?",
         "-c:a", "aac", "-ar", "48000", "-b:a", variant["audio_bitrate"],
@@ -196,7 +196,10 @@ def _nvenc_variant_output_args(
         "-preset", preset,
         "-rc", "vbr",
         "-cq", str(variant["crf"]),
-        "-bf", str(bframes),
+    ]
+    if bframes is not None:
+        args.extend(["-bf", str(bframes)])
+    args.extend([
         "-b:v", variant["video_bitrate"],
         "-maxrate", variant["maxrate"],
         "-bufsize", variant["bufsize"],
@@ -206,7 +209,8 @@ def _nvenc_variant_output_args(
         "-hls_playlist_type", "vod",
         "-hls_segment_filename", seg_pattern,
         "-f", "hls", playlist,
-    ]
+    ])
+    return args
 
 
 def build_ffmpeg_args(
@@ -222,7 +226,7 @@ def build_ffmpeg_args(
     nvenc_preset: str,
     portrait: bool = False,
     cuvid_decoder: Optional[str] = None,
-    bframes: int = 0,
+    bframes: Optional[int] = None,
 ) -> list[str]:
     """フル ffmpeg 引数を組み立てる。
 
@@ -301,7 +305,7 @@ def convert_mp4_to_hls(
     preset_ = preset or ffmpeg_preset()
     nvenc_preset_ = nvenc_preset or ffmpeg_nvenc_preset()
     threads_ = threads if threads is not None else ffmpeg_threads()
-    bframes_ = bframes if bframes is not None else ffmpeg_bframes()
+    bframes_ = bframes if bframes is not None else ffmpeg_bframes()  # None 可
 
     # CUVID decoder 解決。NVENC バックエンド時のみ有効。
     cuvid_decoder: Optional[str] = None
@@ -324,10 +328,10 @@ def convert_mp4_to_hls(
     logger.info(
         "HLS encode: backend=%s variants=%s preset=%s nvenc_preset=%s "
         "threads=%d gop=%d portrait=%s (in=%sx%s codec=%s) "
-        "cuvid=%s bframes=%d",
+        "cuvid=%s bframes=%s",
         backend, [v["name"] for v in selected], preset_, nvenc_preset_,
         threads_, gop, portrait, input_width, input_height, input_codec,
-        cuvid_decoder or "off", bframes_,
+        cuvid_decoder or "off", "default" if bframes_ is None else bframes_,
     )
 
     args = build_ffmpeg_args(

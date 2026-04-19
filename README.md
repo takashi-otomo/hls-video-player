@@ -114,9 +114,9 @@ MEDIA_ROOT=./media .venv/bin/python -m hls_video.cli media/source/movie.mp4
 | `FFMPEG_THREADS` | `0` (auto) | 各エンコーダのスレッド数。0 = ffmpeg 自動 |
 | `FFMPEG_PRESET` | `ultrafast` | libx264 プリセット（CPU encode 時） |
 | `FFMPEG_HWACCEL` | `auto` | `auto` / `nvenc` / `cpu`。auto は NVENC 利用可能なら自動選択 |
-| `FFMPEG_CUVID` | `auto` | `auto` / `on` / `off`。NVENC 時に GPU decode (CUVID) も使うか |
+| `FFMPEG_CUVID` | `off` | `auto` / `on` / `off`。NVENC 時に GPU decode (CUVID) も使うか。環境によって libcuda ロードで落ちるため既定 off |
 | `FFMPEG_NVENC_PRESET` | `p4` | h264_nvenc プリセット（`p1`=最速, `p7`=最高画質） |
-| `FFMPEG_BFRAMES` | `0` | NVENC の -bf 値。0 で B-frames 無効化（速度優先） |
+| `FFMPEG_BFRAMES` | *(未設定)* | NVENC の -bf 値。未設定なら NVENC デフォルト。`0` で B-frames 無効化 |
 | `FFMPEG_VARIANTS` | *(空)* | `720p,360p` などでラダーを絞る。未指定は 4 本全部 |
 | `FFMPEG_NICE` | `10` | プロセス優先度（Unix 系のみ） |
 
@@ -128,8 +128,12 @@ NVENC + CUVID の組合せで decode / scale / encode を全て GPU 上で完結
 | 環境 | 実時間あたり変換速度 |
 |---|---|
 | CPU (libx264, preset=ultrafast) | 1〜2x |
-| NVIDIA GPU + CPU decode (h264_nvenc, p4, bf=0) | 3〜5x |
-| NVIDIA GPU + CUVID (+ `scale_cuda`) | **5〜10x** |
+| NVIDIA GPU + CPU decode (h264_nvenc, p4) | **3〜5x**（既定） |
+| NVIDIA GPU + CUVID (+ `scale_cuda`) | 5〜10x（`FFMPEG_CUVID=auto` で有効化） |
+
+> CUVID は `ffmpeg -init_hw_device cuda` で成功する環境でのみ安全に動くため既定 off。
+> Colab など環境によっては libcuda.so.1 のロードで落ちるため、動作確認済みの環境で
+> 明示的に `FFMPEG_CUVID=auto` にする運用を推奨します。
 
 ### 軽量化プリセット
 

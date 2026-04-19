@@ -67,31 +67,36 @@ def ffmpeg_hwaccel() -> str:
 
 
 def ffmpeg_cuvid() -> str:
-    """FFMPEG_CUVID: "auto" (既定) / "on" / "off"。
+    """FFMPEG_CUVID: "off" (既定) / "on" / "auto"。
 
     NVENC 使用時に **GPU decode (CUVID)** も使うかどうか。有効なら input 側で
     `-hwaccel cuda -hwaccel_output_format cuda -c:v <codec>_cuvid` を追加し、
-    filter_complex も `scale_cuda` に置き換える。これで decode もメモリコピー
-    なしで GPU に乗るため CPU decode ネックが解消される。
+    filter_complex も `scale_cuda` に置き換える。decode / scale / encode が
+    全て GPU 上で完結しメモリコピーも排除できるが、環境によっては libcuda.so.1
+    のロードに失敗するため **既定は off**。動作確認済み環境で速度を出したい
+    場合だけ明示的に `on` / `auto` を指定。
 
     auto: 入力 codec に対応する cuvid decoder が ffmpeg にあれば自動有効化。
-    on: 対応が検出できれば使う（auto と同挙動だが警告ログを出す）。
-    off: CPU decode のまま (NVENC encode のみ)。
+    on: 対応が検出できれば使う。
+    off: CPU decode のまま (NVENC encode のみ)。[既定]
     """
-    return os.environ.get("FFMPEG_CUVID", "auto").lower()
+    return os.environ.get("FFMPEG_CUVID", "off").lower()
 
 
-def ffmpeg_bframes() -> int:
-    """NVENC の -bf 値。既定 0 (B-frames 無効で速度優先)。
+def ffmpeg_bframes() -> int | None:
+    """NVENC の -bf 値。未設定なら None → `-bf` 引数自体を付けない (NVENC デフォルト動作)。
 
-    libx264 には影響しない。NVENC でのみ出力オプションとして付与。
-    `-bf 2`〜`-bf 3` にすると圧縮効率が 5-10% 上がるが速度は少し落ちる。
+    - 未設定 / 不正値: None (NVENC 既定の B-frames 使用、通常は 0 か 2)
+    - "0": B-frames 無効化、速度優先だが圧縮効率は 5-10% 悪化
+    - "2"〜"3": 圧縮重視
     """
-    raw = os.environ.get("FFMPEG_BFRAMES", "0")
+    raw = os.environ.get("FFMPEG_BFRAMES")
+    if raw is None or raw == "":
+        return None
     try:
         v = int(raw)
     except ValueError:
-        return 0
+        return None
     return max(0, v)
 
 

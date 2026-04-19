@@ -35,6 +35,10 @@ def test_defaults():
     assert config.ffmpeg_nvenc_preset() == "p4"
     # HW accel は auto 検出
     assert config.ffmpeg_hwaccel() == "auto"
+    # CUVID は既定 off（libcuda ロード失敗対策で保守的に）
+    assert config.ffmpeg_cuvid() == "off"
+    # B-frames は既定値なし（NVENC デフォルトに任せる）
+    assert config.ffmpeg_bframes() is None
     # variants 絞り込みは未指定なら None
     assert config.ffmpeg_variants_filter() is None
     assert config.ffmpeg_nice() is None
@@ -67,30 +71,36 @@ def test_ffmpeg_hwaccel_case_insensitive(monkeypatch):
     assert config.ffmpeg_hwaccel() == "nvenc"
 
 
-def test_ffmpeg_cuvid_default_auto():
-    assert config.ffmpeg_cuvid() == "auto"
+def test_ffmpeg_cuvid_default_off():
+    """既定は保守的に off（libcuda ロード不可環境で落ちないように）。"""
+    assert config.ffmpeg_cuvid() == "off"
 
 
 def test_ffmpeg_cuvid_lowercased(monkeypatch):
-    monkeypatch.setenv("FFMPEG_CUVID", "ON")
-    assert config.ffmpeg_cuvid() == "on"
+    monkeypatch.setenv("FFMPEG_CUVID", "AUTO")
+    assert config.ffmpeg_cuvid() == "auto"
 
 
-def test_ffmpeg_bframes_default_zero():
+def test_ffmpeg_bframes_default_none():
+    assert config.ffmpeg_bframes() is None
+
+
+def test_ffmpeg_bframes_env_override_zero(monkeypatch):
+    monkeypatch.setenv("FFMPEG_BFRAMES", "0")
     assert config.ffmpeg_bframes() == 0
 
 
-def test_ffmpeg_bframes_env_override(monkeypatch):
+def test_ffmpeg_bframes_env_override_positive(monkeypatch):
     monkeypatch.setenv("FFMPEG_BFRAMES", "3")
     assert config.ffmpeg_bframes() == 3
 
 
-def test_ffmpeg_bframes_invalid_returns_zero(monkeypatch):
+def test_ffmpeg_bframes_invalid_returns_none(monkeypatch):
     monkeypatch.setenv("FFMPEG_BFRAMES", "abc")
-    assert config.ffmpeg_bframes() == 0
+    assert config.ffmpeg_bframes() is None
 
 
-def test_ffmpeg_bframes_negative_clamped(monkeypatch):
+def test_ffmpeg_bframes_negative_clamped_to_zero(monkeypatch):
     monkeypatch.setenv("FFMPEG_BFRAMES", "-2")
     assert config.ffmpeg_bframes() == 0
 

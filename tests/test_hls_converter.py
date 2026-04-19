@@ -137,12 +137,21 @@ class TestBuildFfmpegArgsNVENC:
         fc = args[args.index("-filter_complex") + 1]
         assert "split=4" in fc
 
-    def test_default_bframes_zero(self):
+    def test_default_bframes_absent(self):
+        """bframes 引数デフォルトは None → `-bf` を付けない (NVENC デフォルト任せ)。"""
         args = self._args()
+        assert "-bf" not in args
+
+    def test_bframes_none_omits_flag(self):
+        args = self._args(bframes=None)
+        assert "-bf" not in args
+
+    def test_bframes_zero_propagates(self):
+        args = self._args(bframes=0)
         bf = [args[i + 1] for i in _find_all(args, "-bf")]
         assert bf == ["0"] * 4
 
-    def test_bframes_propagates_to_all_variants(self):
+    def test_bframes_positive_propagates_to_all_variants(self):
         args = self._args(bframes=3)
         bf = [args[i + 1] for i in _find_all(args, "-bf")]
         assert bf == ["3"] * 4
