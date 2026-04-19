@@ -179,9 +179,21 @@ MyDrive/
    - Gradio の `setup_tunnel` で `*.gradio.live` の公開 URL を発行
    - `demo.launch(share=True)` だと Gradio 単体用の別サーバが立ち、`/hls/*` 等が share URL で見えなくなる。本方式なら全ルートが 1 本の URL 配下でアクセス可能
 
-### コード更新時
+### コード更新時（Drive 同期）
 
-手元で編集 → Drive に上書き同期 → Colab でノートを先頭から再実行。セル 3 が Drive から毎回コピーし直すので、古いコードは上書きされます。
+手元で編集 → `scripts/sync-to-drive.sh` 実行 → Colab でノートを先頭から再実行。
+
+```bash
+# Mac の Google Drive for desktop が /Users/takashi/Google Drive/マイドライブ を
+# 提供している前提。別パスなら HLS_DRIVE_DEST か第 1 引数で指定。
+./scripts/sync-to-drive.sh                 # 既定パスへ rsync
+./scripts/sync-to-drive.sh --dry-run       # 何がコピーされるか事前確認
+./scripts/sync-to-drive.sh --delete        # Drive 側の余剰ファイルも削除
+./scripts/sync-to-drive.sh "/path/to/dst"  # 宛先を上書き
+```
+
+除外: `.git/`、`.venv/`、`__pycache__/`、`*.egg-info/`、`.DS_Store`、`.gradio/`、`media/`、`node_modules/` 等。
+**`media/` は同期対象外** — Drive 側の実体がソース・オブ・トゥルースのため、ローカル変換出力で Drive を汚さない。
 
 ### Colab 固有の注意
 
