@@ -127,7 +127,7 @@ def convert_mp4_to_hls(
         if on_progress is not None
         else None
     )
-    run_ffmpeg(args, on_progress=stderr_handler)
+    run_ffmpeg(args, on_progress=stderr_handler, label=f"hls:{Path(output_dir).name}")
 
     master = build_master_playlist([
         {"bandwidth": v["bandwidth"], "resolution": v["resolution"], "playlist": f"{v['name']}.m3u8"}

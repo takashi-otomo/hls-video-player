@@ -101,7 +101,21 @@ def _status_badge(source: dict, job: Job | None) -> str:
             f'border-radius:999px;height:8px;overflow:hidden;">'
             f'<div style="width:{pct}%;height:100%;background:linear-gradient(90deg,#4aa8ff,#6fd0ff);"></div></div>'
         )
-        return f'<div>{bar}<div style="font-size:0.75rem;color:#8b93a1;margin-top:2px">{stage} <strong>{pct}%</strong></div></div>'
+        # 最終更新からの経過秒数を表示（stall 検出用）
+        tail = ""
+        if job.last_progress_at:
+            from datetime import datetime, timezone
+            try:
+                last = datetime.fromisoformat(job.last_progress_at.replace("Z", "+00:00"))
+                delta = (datetime.now(tz=timezone.utc) - last).total_seconds()
+                if delta > 30:
+                    color = "#ff9595" if delta > 120 else "#f0c47a"
+                    tail = f' <span style="color:{color}">⚠ {int(delta)}s 更新なし</span>'
+                else:
+                    tail = f' <span style="color:#8b93a1">({int(delta)}s 前更新)</span>'
+            except Exception:
+                pass
+        return f'<div>{bar}<div style="font-size:0.75rem;color:#8b93a1;margin-top:2px">{stage} <strong>{pct}%</strong>{tail}</div></div>'
     if job and job.state == "failed":
         return f'<span style="color:#ff9595">✗ 失敗: {html.escape((job.error or "")[:80])}</span>'
     if source.get("converted"):

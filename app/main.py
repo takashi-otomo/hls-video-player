@@ -18,9 +18,11 @@ from app.gradio_ui import build_ui
 from app.static_mount import mount_static
 from app.player_embed import router as player_router
 from hls_video.config import media_root
+from hls_video.logging_setup import setup_logging
 
 
 def build_app() -> FastAPI:
+    setup_logging()  # stdout への INFO ログを有効化（Colab 可視）
     media = media_root()
     static_dir = str(Path(__file__).parent.parent / "static")
 
@@ -36,6 +38,7 @@ def build_app() -> FastAPI:
 
 
 def main() -> None:
+    setup_logging()
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", "7860"))
     uvicorn.run(
@@ -43,7 +46,7 @@ def main() -> None:
         host=host,
         port=port,
         factory=True,
-        log_level=os.environ.get("LOG_LEVEL", "info"),
+        log_level=os.environ.get("UVICORN_LOG_LEVEL", "info"),
     )
 
 

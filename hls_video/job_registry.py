@@ -31,6 +31,9 @@ class Job:
     created_at: str = field(default_factory=lambda: datetime.now(tz=timezone.utc).isoformat())
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
+    # 最終進捗更新時刻。UI が「X秒前に更新」を表示したり、
+    # ストールしているジョブを検出するのに使う。
+    last_progress_at: Optional[str] = None
 
     def snapshot(self) -> dict:
         return {
@@ -46,6 +49,7 @@ class Job:
             "created_at": self.created_at,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
+            "last_progress_at": self.last_progress_at,
         }
 
 

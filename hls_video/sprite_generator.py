@@ -113,7 +113,7 @@ def generate_sprite(
         if on_progress is not None
         else None
     )
-    run_ffmpeg(args, on_progress=stderr_handler)
+    run_ffmpeg(args, on_progress=stderr_handler, label=f"sprite:{video_id}")
 
     # VTT 生成（URL は `/sprites/<id>.jpg` を想定）
     sprite_url = f"/sprites/{video_id}.jpg"
