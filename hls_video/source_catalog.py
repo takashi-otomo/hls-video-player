@@ -122,3 +122,81 @@ def delete_source_file(media_root: str, filename: str) -> dict:
         "message": f"{filename} を削除しました（HLS と スプライトは保持）",
         "filename": filename,
     }
+
+
+def delete_converted_output(media_root: str, video_id: str) -> dict:
+    """変換結果 (HLS + sprite) を削除する。`media/source/` は一切触らない。
+
+    削除対象:
+    - `media/hls/<video_id>/` (再帰削除)
+    - `media/sprites/<video_id>.jpg`, `.vtt`, `.json`, `<video_id>-*.jpg`
+
+    MP4 (`media/source/<filename>`) は保持するので、再変換すればやり直せる。
+    Drive 経由変換など `media/source/` に実体が無いケースでは、このあと
+    動画一覧から完全に消える（list_sources で拾われなくなる）。
+
+    video_id は `[a-zA-Z0-9_-]+` 以外を拒否してパストラバーサル防御。
+    """
+    if not video_id or _SANITIZE_RE.search(video_id):
+        return {"ok": False, "message": "無効な video_id です", "video_id": video_id}
+
+    root = Path(media_root).resolve()
+    hls_dir = (root / "hls" / video_id).resolve()
+    sprites_dir = (root / "sprites").resolve()
+
+    # hls_dir が root/hls 配下であることを確認
+    try:
+        hls_dir.relative_to((root / "hls").resolve())
+    except ValueError:
+        return {"ok": False, "message": "無効なパスです（hls/ の外）", "video_id": video_id}
+
+    removed: list[str] = []
+
+    if hls_dir.exists() and hls_dir.is_dir():
+        try:
+            shutil.rmtree(hls_dir)
+            removed.append(f"hls/{video_id}/")
+        except OSError as e:
+            return {"ok": False, "message": f"HLS 削除失敗: {e}", "video_id": video_id}
+
+    # スプライト関連ファイル (単体 + multi-sheet 分)
+    if sprites_dir.exists():
+        patterns = [
+            f"{video_id}.jpg",
+            f"{video_id}.vtt",
+            f"{video_id}.json",
+        ]
+        for name in patterns:
+            f = sprites_dir / name
+            if f.exists() and f.is_file():
+                try:
+                    f.unlink()
+                    removed.append(f"sprites/{name}")
+                except OSError as e:
+                    logger_msg = f"sprites/{name} 削除失敗: {e}"
+                    return {"ok": False, "message": logger_msg, "video_id": video_id}
+        # multi-sheet (<id>-1.jpg, <id>-2.jpg, ...)
+        for f in sprites_dir.glob(f"{video_id}-*.jpg"):
+            try:
+                f.unlink()
+                removed.append(f"sprites/{f.name}")
+            except OSError as e:
+                return {
+                    "ok": False,
+                    "message": f"sprites/{f.name} 削除失敗: {e}",
+                    "video_id": video_id,
+                }
+
+    if not removed:
+        return {
+            "ok": False,
+            "message": f"変換結果が見つかりません: {video_id}",
+            "video_id": video_id,
+        }
+
+    return {
+        "ok": True,
+        "message": f"{video_id} の変換結果を削除しました（MP4 は保持）",
+        "video_id": video_id,
+        "removed": removed,
+    }

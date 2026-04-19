@@ -21,8 +21,9 @@ from hls_video.drive_browser import (
 )
 from hls_video.job_registry import Job, JobRegistry
 from hls_video.logging_setup import setup_logging
-from hls_video.source_catalog import (
-    delete_source_file, list_sources, resolve_video_id, VIDEO_EXTS,
+from hls_video.source_catalog import (  # noqa: E402 (keep list grouped)
+    delete_converted_output, delete_source_file, list_sources,
+    resolve_video_id, VIDEO_EXTS,
 )
 
 from app.player_embed import empty_html, iframe_html
@@ -652,17 +653,21 @@ def _make_action_button(source, job, registry, sources_state, playing_state, pla
         gr.Button("処理中", interactive=False, size="sm")
         return
 
-    # 変換済みなら再生ボタン + (ソースが残っていれば) MP4 削除ボタン
+    # 変換済みなら再生ボタン + MP4 削除 (ソースが残っていれば) + HLS 削除
     if source.get("converted"):
         with gr.Row():
-            play_btn = gr.Button("▶ 再生", variant="primary", size="sm", scale=2)
+            play_btn = gr.Button("▶ 再生", variant="primary", size="sm", scale=3)
             if not source.get("source_deleted"):
-                delete_btn = gr.Button(
-                    "🗑", variant="secondary", size="sm", scale=1,
-                    min_width=44,
+                mp4_delete_btn = gr.Button(
+                    "🗑 MP4", variant="secondary", size="sm", scale=2,
+                    min_width=72,
                 )
             else:
-                delete_btn = None  # ソース既に削除済 → ボタン不要
+                mp4_delete_btn = None  # MP4 既に無い
+            hls_delete_btn = gr.Button(
+                "✕ HLS", variant="stop", size="sm", scale=2,
+                min_width=72,
+            )
 
         def _do_play(current_playing, vid=source["video_id"]):
             if current_playing == vid:
@@ -671,13 +676,32 @@ def _make_action_button(source, job, registry, sources_state, playing_state, pla
 
         play_btn.click(_do_play, inputs=playing_state, outputs=[player_area, playing_state])
 
-        if delete_btn is not None:
-            def _do_delete(filename=source["filename"]):
+        if mp4_delete_btn is not None:
+            def _do_delete_mp4(filename=source["filename"]):
                 delete_source_file(str(media_dir), filename)
                 sources = _load_sources(media_dir, registry)
                 any_active = any(s.get("active_job_id") for s in sources)
                 return sources, gr.update(active=any_active)
-            delete_btn.click(_do_delete, outputs=[sources_state, poll_timer])
+            mp4_delete_btn.click(_do_delete_mp4, outputs=[sources_state, poll_timer])
+
+        def _do_delete_hls(
+            vid=source["video_id"],
+            playing: str | None = None,
+        ):
+            delete_converted_output(str(media_dir), vid)
+            sources = _load_sources(media_dir, registry)
+            any_active = any(s.get("active_job_id") for s in sources)
+            # 再生中だった動画を消したら player を閉じる
+            next_player = empty_html() if playing == vid else gr.update()
+            next_playing = None if playing == vid else gr.update()
+            return (
+                sources, gr.update(active=any_active), next_player, next_playing,
+            )
+        hls_delete_btn.click(
+            _do_delete_hls,
+            inputs=playing_state,
+            outputs=[sources_state, poll_timer, player_area, playing_state],
+        )
         return
 
     # ランタイム再起動後の再開待ち (staging に残存) → 再開ボタン

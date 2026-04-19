@@ -3,9 +3,10 @@
 import json
 
 from hls_video.source_catalog import (
+    delete_converted_output,
+    delete_source_file,
     list_sources,
     resolve_video_id,
-    delete_source_file,
 )
 
 
@@ -158,3 +159,69 @@ class TestDeleteSourceFile:
         delete_source_file(str(tmp_path), "v.mp4")
         assert (tmp_path / "hls" / "v" / "master.m3u8").exists()
         assert (tmp_path / "sprites" / "v.jpg").exists()
+
+
+class TestDeleteConvertedOutput:
+    """変換結果 (hls + sprites) の削除。MP4 (source/) は絶対に触らない。"""
+
+    def _full_setup(self, tmp_path, video_id: str = "v"):
+        _bootstrap(tmp_path)
+        (tmp_path / "source" / f"{video_id}.mp4").write_bytes(b"MP4_BODY")
+        vhls = tmp_path / "hls" / video_id
+        vhls.mkdir()
+        (vhls / "master.m3u8").write_text("#EXTM3U")
+        (vhls / "720p.m3u8").write_text("#EXTM3U")
+        (vhls / "720p_000.ts").write_bytes(b"ts")
+        (tmp_path / "sprites" / f"{video_id}.jpg").write_bytes(b"J")
+        (tmp_path / "sprites" / f"{video_id}.vtt").write_text("WEBVTT")
+        (tmp_path / "sprites" / f"{video_id}.json").write_text("{}")
+
+    def test_removes_hls_dir_and_sprite_files(self, tmp_path):
+        self._full_setup(tmp_path)
+        res = delete_converted_output(str(tmp_path), "v")
+        assert res["ok"] is True
+        assert not (tmp_path / "hls" / "v").exists()
+        assert not (tmp_path / "sprites" / "v.jpg").exists()
+        assert not (tmp_path / "sprites" / "v.vtt").exists()
+        assert not (tmp_path / "sprites" / "v.json").exists()
+
+    def test_preserves_source_mp4(self, tmp_path):
+        """変換削除後も media/source/ のファイルは絶対に残す。"""
+        self._full_setup(tmp_path)
+        delete_converted_output(str(tmp_path), "v")
+        src = tmp_path / "source" / "v.mp4"
+        assert src.exists()
+        assert src.read_bytes() == b"MP4_BODY"
+
+    def test_removes_multi_sheet_sprites(self, tmp_path):
+        self._full_setup(tmp_path)
+        # 追加のシート
+        (tmp_path / "sprites" / "v-1.jpg").write_bytes(b"")
+        (tmp_path / "sprites" / "v-2.jpg").write_bytes(b"")
+        delete_converted_output(str(tmp_path), "v")
+        assert not (tmp_path / "sprites" / "v-1.jpg").exists()
+        assert not (tmp_path / "sprites" / "v-2.jpg").exists()
+
+    def test_does_not_remove_other_video_sprites(self, tmp_path):
+        """別 video_id のスプライトを巻き添えにしない。"""
+        self._full_setup(tmp_path, video_id="v")
+        # 似た名前の別動画
+        (tmp_path / "sprites" / "valpha.jpg").write_bytes(b"OTHER")
+        delete_converted_output(str(tmp_path), "v")
+        assert (tmp_path / "sprites" / "valpha.jpg").exists()
+
+    def test_rejects_path_traversal(self, tmp_path):
+        _bootstrap(tmp_path)
+        res = delete_converted_output(str(tmp_path), "../etc/passwd")
+        assert res["ok"] is False
+
+    def test_rejects_empty_video_id(self, tmp_path):
+        _bootstrap(tmp_path)
+        res = delete_converted_output(str(tmp_path), "")
+        assert res["ok"] is False
+
+    def test_returns_not_found_when_nothing_to_delete(self, tmp_path):
+        _bootstrap(tmp_path)
+        res = delete_converted_output(str(tmp_path), "ghost")
+        assert res["ok"] is False
+        assert "見つかりません" in res["message"]
