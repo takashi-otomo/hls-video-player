@@ -93,6 +93,34 @@ class TestListVideosUnder:
         result = list_videos_under(str(drive))
         assert result[0].already_imported is False
 
+    def test_already_imported_when_converted_but_source_deleted(self, tmp_path):
+        """media/source/ に同名ファイルが無くても、対応する変換済 HLS があれば重複扱い。"""
+        drive = tmp_path / "drive"
+        drive.mkdir()
+        (drive / "movie.mp4").write_bytes(b"")
+
+        media = tmp_path / "media"
+        (media / "source").mkdir(parents=True)
+        (media / "hls" / "movie").mkdir(parents=True)
+        (media / "hls" / "movie" / "master.m3u8").write_text("#EXTM3U")
+
+        result = list_videos_under(str(drive), media_root=str(media))
+        assert result[0].already_imported is True
+
+    def test_already_imported_considers_sanitized_video_id(self, tmp_path):
+        """video_id は resolve_video_id でサニタイズされた値で比較する。"""
+        drive = tmp_path / "drive"
+        drive.mkdir()
+        (drive / "my video.mp4").write_bytes(b"")  # 空白あり → video_id=my_video
+
+        media = tmp_path / "media"
+        (media / "source").mkdir(parents=True)
+        (media / "hls" / "my_video").mkdir(parents=True)
+        (media / "hls" / "my_video" / "master.m3u8").write_text("#EXTM3U")
+
+        result = list_videos_under(str(drive), media_root=str(media))
+        assert result[0].already_imported is True
+
 
 class TestImportFile:
     def test_copies_to_media_source(self, tmp_path):

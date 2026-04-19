@@ -1,8 +1,12 @@
-"""sourceCatalog.test.js からの移植。"""
+"""sourceCatalog.test.js からの移植 + HLS-only と delete_source_file のテスト。"""
 
 import json
 
-from hls_video.source_catalog import list_sources, resolve_video_id
+from hls_video.source_catalog import (
+    list_sources,
+    resolve_video_id,
+    delete_source_file,
+)
 
 
 def _bootstrap(tmp_path):
@@ -82,3 +86,75 @@ class TestListSources:
             (tmp_path / "source" / n).write_bytes(b"")
         names = [s["filename"] for s in list_sources(str(tmp_path))]
         assert names == ["a.mp4", "b.mp4", "c.mp4"]
+
+    def test_source_deleted_flag_for_source_only(self, tmp_path):
+        _bootstrap(tmp_path)
+        (tmp_path / "source" / "a.mp4").write_bytes(b"")
+        res = list_sources(str(tmp_path))
+        assert res[0]["source_deleted"] is False
+
+    def test_includes_hls_only_as_source_deleted(self, tmp_path):
+        """source/ に原本が無くても hls/ があれば列挙される (source_deleted=True)。"""
+        _bootstrap(tmp_path)
+        (tmp_path / "hls" / "orphan").mkdir()
+        (tmp_path / "hls" / "orphan" / "master.m3u8").write_text("#EXTM3U")
+        res = list_sources(str(tmp_path))
+        assert len(res) == 1
+        assert res[0]["video_id"] == "orphan"
+        assert res[0]["source_deleted"] is True
+        assert res[0]["converted"] is True
+
+    def test_hls_only_includes_sprite_when_available(self, tmp_path):
+        _bootstrap(tmp_path)
+        (tmp_path / "hls" / "demo").mkdir()
+        (tmp_path / "hls" / "demo" / "master.m3u8").write_text("#EXTM3U")
+        (tmp_path / "sprites" / "demo.jpg").write_bytes(b"x")
+        (tmp_path / "sprites" / "demo.json").write_text(json.dumps({
+            "tileWidth": 160, "tileHeight": 90, "columns": 10, "rows": 10,
+            "interval": 10, "tileCount": 3, "sheetCount": 1,
+        }))
+        res = list_sources(str(tmp_path))
+        assert res[0]["sprite"]["sheets"] == ["/sprites/demo.jpg"]
+
+    def test_does_not_duplicate_when_both_source_and_hls_exist(self, tmp_path):
+        _bootstrap(tmp_path)
+        (tmp_path / "source" / "v.mp4").write_bytes(b"")
+        (tmp_path / "hls" / "v").mkdir()
+        (tmp_path / "hls" / "v" / "master.m3u8").write_text("#EXTM3U")
+        res = list_sources(str(tmp_path))
+        assert len(res) == 1
+        assert res[0]["source_deleted"] is False
+
+
+class TestDeleteSourceFile:
+    def test_removes_regular_file(self, tmp_path):
+        _bootstrap(tmp_path)
+        (tmp_path / "source" / "a.mp4").write_bytes(b"data")
+        res = delete_source_file(str(tmp_path), "a.mp4")
+        assert res["ok"] is True
+        assert not (tmp_path / "source" / "a.mp4").exists()
+
+    def test_returns_not_found(self, tmp_path):
+        _bootstrap(tmp_path)
+        res = delete_source_file(str(tmp_path), "nope.mp4")
+        assert res["ok"] is False
+        assert "見つかりません" in res["message"]
+
+    def test_rejects_path_traversal(self, tmp_path):
+        _bootstrap(tmp_path)
+        # secret ファイルを source/ の外に配置
+        (tmp_path / "secret.txt").write_text("SECRET")
+        res = delete_source_file(str(tmp_path), "../secret.txt")
+        assert res["ok"] is False
+        # secret は残っているはず
+        assert (tmp_path / "secret.txt").exists()
+
+    def test_keeps_hls_and_sprites_intact(self, tmp_path):
+        _bootstrap(tmp_path)
+        (tmp_path / "source" / "v.mp4").write_bytes(b"x")
+        (tmp_path / "hls" / "v").mkdir()
+        (tmp_path / "hls" / "v" / "master.m3u8").write_text("#EXTM3U")
+        (tmp_path / "sprites" / "v.jpg").write_bytes(b"")
+        delete_source_file(str(tmp_path), "v.mp4")
+        assert (tmp_path / "hls" / "v" / "master.m3u8").exists()
+        assert (tmp_path / "sprites" / "v.jpg").exists()

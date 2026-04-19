@@ -16,7 +16,7 @@ import shutil
 from pathlib import Path
 from typing import NamedTuple
 
-from hls_video.source_catalog import VIDEO_EXTS
+from hls_video.source_catalog import VIDEO_EXTS, resolve_video_id
 
 
 class BrowseEntry(NamedTuple):
@@ -24,7 +24,10 @@ class BrowseEntry(NamedTuple):
     rel: str         # ブラウズルートからの相対パス（UI 表示用）
     size_bytes: int
     mtime: float     # 更新時刻（epoch 秒）
-    already_imported: bool = False  # media/source/ に同名ファイルが既にあるか
+    # 重複判定: 下記いずれかに該当すれば True
+    #   - 同名ファイルが media_root/source/<filename> に既にある
+    #   - resolve_video_id(filename) に対応する変換済み (hls/<video_id>/master.m3u8) がある
+    already_imported: bool = False
 
 
 def list_videos_under(
@@ -38,21 +41,31 @@ def list_videos_under(
     - シンボリックリンクは辿らない（無限ループ回避）
     - 非表示ディレクトリ（`.` 始まり）、`node_modules`, `__pycache__` はスキップ
     - max_depth で深さ制限（Drive の巨大ツリー誤走査対策）
-    - media_root が指定されていれば、`media_root/source/<filename>` の存在を調べ、
-      already_imported フラグを立てる
+    - media_root が指定されていれば、下記いずれかに該当するファイルに
+      already_imported=True を立てる:
+        1) 同じファイル名が media_root/source/ にある
+        2) 対応する video_id が変換済み (media_root/hls/<id>/master.m3u8 あり)
     """
     base = Path(root)
     if not base.is_dir():
         return []
 
     skip_names = {"node_modules", "__pycache__", ".git", ".claude", ".venv"}
+
+    # 重複判定用ルックアップ
     imported_names: set[str] = set()
+    converted_video_ids: set[str] = set()
     if media_root:
         source_dir = Path(media_root) / "source"
         if source_dir.is_dir():
             for f in source_dir.iterdir():
                 if f.is_file() and not f.name.startswith("."):
                     imported_names.add(f.name)
+        hls_dir = Path(media_root) / "hls"
+        if hls_dir.is_dir():
+            for d in hls_dir.iterdir():
+                if d.is_dir() and (d / "master.m3u8").exists():
+                    converted_video_ids.add(d.name)
 
     results: list[BrowseEntry] = []
 
@@ -76,12 +89,17 @@ def list_videos_under(
                         mtime = st.st_mtime
                     except OSError:
                         size, mtime = 0, 0.0
+                    vid = resolve_video_id(entry.name)
+                    duplicate = (
+                        entry.name in imported_names
+                        or vid in converted_video_ids
+                    )
                     results.append(BrowseEntry(
                         path=str(entry.resolve()),
                         rel=str(entry.relative_to(base)),
                         size_bytes=size,
                         mtime=mtime,
-                        already_imported=entry.name in imported_names,
+                        already_imported=duplicate,
                     ))
             elif entry.is_dir():
                 walk(entry, depth + 1)

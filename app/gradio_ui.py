@@ -15,7 +15,9 @@ from hls_video.config import max_concurrent_jobs, media_root
 from hls_video.conversion_runner import run_conversion
 from hls_video.drive_browser import import_file, list_videos_under
 from hls_video.job_registry import Job, JobRegistry
-from hls_video.source_catalog import list_sources, resolve_video_id, VIDEO_EXTS
+from hls_video.source_catalog import (
+    delete_source_file, list_sources, resolve_video_id, VIDEO_EXTS,
+)
 
 from app.player_embed import empty_html, iframe_html
 
@@ -103,6 +105,8 @@ def _status_badge(source: dict, job: Job | None) -> str:
     if job and job.state == "failed":
         return f'<span style="color:#ff9595">✗ 失敗: {html.escape((job.error or "")[:80])}</span>'
     if source.get("converted"):
+        if source.get("source_deleted"):
+            return '<span style="color:#7fd498">✓ 変換済</span> <span style="color:#8b93a1;font-size:0.75rem">(MP4 削除済)</span>'
         return '<span style="color:#7fd498">✓ 変換済</span>'
     return '<span style="color:#f0c47a">未変換</span>'
 
@@ -156,7 +160,7 @@ def build_ui(
                         gr.Markdown(
                             "指定したディレクトリ配下の `.mp4 / .mov / .mkv / .webm` を走査し、"
                             "選んだファイルを `media/source/` に **コピー** して取り込みます。\n"
-                            "列ヘッダをクリックでソート、`取込済` 列に ✓ があれば既に `media/source/` に同名あり。"
+                            "`重複` 列に ✓ が付く条件: **media/source/ に同名ファイルがある、または 対応する動画が変換済み**。"
                         )
                         with gr.Row():
                             browse_path = gr.Textbox(
@@ -166,7 +170,7 @@ def build_ui(
                             )
                             scan_btn = gr.Button("🔍 走査", scale=1)
                         file_picker = gr.Dataframe(
-                            headers=["取込済", "ファイル名", "サイズ(MB)", "更新日時"],
+                            headers=["重複", "ファイル名", "サイズ(MB)", "更新日時"],
                             datatype=["str", "str", "number", "str"],
                             # col_count は古い Gradio 互換の名前。新しい Gradio では
                             # deprecation warning が出るが column_count で動く。
@@ -299,10 +303,10 @@ def build_ui(
                     gr.update(value="", visible=False),
                     gr.update(value=f"`{path}` の下に動画が見つかりませんでした。", visible=True),
                 )
-            imported_count = sum(1 for e in entries if e.already_imported)
+            duplicate_count = sum(1 for e in entries if e.already_imported)
             msg = f"**{len(entries)}** 件見つかりました"
-            if imported_count:
-                msg += f"（うち **{imported_count}** 件は取込済 ✓）"
+            if duplicate_count:
+                msg += f"（うち **{duplicate_count}** 件は取込済または変換済 ✓）"
             msg += "。行をクリックして追加するファイルを選択してください。"
             return (
                 gr.update(value=_entries_to_df(entries)),
@@ -326,7 +330,7 @@ def build_ui(
             if not (0 <= row_idx < len(entries)):
                 return None, gr.update(value="", visible=False)
             e = entries[row_idx]
-            warn = "  ⚠️ 既に取込済（上書きチェックを ON にするか別名で運用）" if e.already_imported else ""
+            warn = "  ⚠️ 重複（取込済または変換済）— 上書きチェックが必要" if e.already_imported else ""
             return e.path, gr.update(
                 value=f"選択中: `{e.rel}`{warn}",
                 visible=True,
@@ -400,6 +404,12 @@ def _toggle_sort(sort_cfg: dict, col: str) -> dict:
     return {"column": col, "direction": "asc"}
 
 
+def _size_cell(s: dict) -> str:
+    if s.get("source_deleted"):
+        return "—"
+    return _format_size(s.get("size_bytes", 0))
+
+
 def _render_list(
     sources, registry, sources_state, playing_state, player_area, poll_timer,
     sort_cfg, sort_state,
@@ -440,7 +450,7 @@ def _render_list(
                 with gr.Column(scale=_LIST_SCALES[0], min_width=120):
                     gr.Markdown(f"`{s['filename']}`")
                 with gr.Column(scale=_LIST_SCALES[1], min_width=60):
-                    gr.Markdown(_format_size(s["size_bytes"]))
+                    gr.Markdown(_size_cell(s))
                 with gr.Column(scale=_LIST_SCALES[2], min_width=100):
                     gr.Markdown(s["modified_at"][:16].replace("T", " "))
                 with gr.Column(scale=_LIST_SCALES[3], min_width=80):
@@ -461,7 +471,7 @@ def _render_cards(sources, registry, sources_state, playing_state, player_area, 
                 job = registry.find_active_by_video_id(s["video_id"])
                 with gr.Column(scale=1, min_width=240):
                     gr.HTML(_thumb_html(s.get("sprite")))
-                    gr.Markdown(f"**`{s['filename']}`**\n\n{_format_size(s['size_bytes'])} · {s['modified_at'][:10]}")
+                    gr.Markdown(f"**`{s['filename']}`**\n\n{_size_cell(s)} · {s['modified_at'][:10]}")
                     gr.HTML(_status_badge(s, job))
                     _make_action_button(s, job, registry, sources_state, playing_state, player_area, poll_timer)
 
@@ -476,9 +486,17 @@ def _make_action_button(source, job, registry, sources_state, playing_state, pla
         gr.Button("処理中", interactive=False, size="sm")
         return
 
-    # 変換済みなら再生ボタン
+    # 変換済みなら再生ボタン + (ソースが残っていれば) MP4 削除ボタン
     if source.get("converted"):
-        play_btn = gr.Button("▶ 再生", variant="primary", size="sm")
+        with gr.Row():
+            play_btn = gr.Button("▶ 再生", variant="primary", size="sm", scale=2)
+            if not source.get("source_deleted"):
+                delete_btn = gr.Button(
+                    "🗑", variant="secondary", size="sm", scale=1,
+                    min_width=44,
+                )
+            else:
+                delete_btn = None  # ソース既に削除済 → ボタン不要
 
         def _do_play(current_playing, vid=source["video_id"]):
             if current_playing == vid:
@@ -486,6 +504,14 @@ def _make_action_button(source, job, registry, sources_state, playing_state, pla
             return iframe_html(vid), vid
 
         play_btn.click(_do_play, inputs=playing_state, outputs=[player_area, playing_state])
+
+        if delete_btn is not None:
+            def _do_delete(filename=source["filename"]):
+                delete_source_file(str(media_dir), filename)
+                sources = _load_sources(media_dir, registry)
+                any_active = any(s.get("active_job_id") for s in sources)
+                return sources, gr.update(active=any_active)
+            delete_btn.click(_do_delete, outputs=[sources_state, poll_timer])
         return
 
     # 未変換なら変換ボタン
