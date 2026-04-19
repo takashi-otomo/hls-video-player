@@ -168,10 +168,16 @@ MyDrive/
 
 1. **FFmpeg + Python 依存**: `apt install ffmpeg` / `pip install gradio fastapi uvicorn python-multipart`
 2. **Drive マウント**: `drive.mount('/content/drive')`
-3. **Google Drive からコードベースをコピー**: `/content/drive/MyDrive/hls-video-player` → `/content/hls-video-player`（`media/`, `.git`, `__pycache__`, `.venv` 等は除外）
+3. **Google Drive からコードベースをコピー**:
+   - コード: `/content/drive/MyDrive/hls-video-player` → `/content/hls-video-player` （`.git`, `__pycache__`, `.venv`, `media/` は除外）
+   - メディア: `/content/hls-video-player/media` → `/content/drive/MyDrive/hls-video-player/media` の **シンボリックリンク**
+     → アプリは Colab ローカルで動き、動画の実体は Drive に永続化
 4. **Python パッケージとしてインストール**: `pip install -e .`
-5. **`MEDIA_ROOT` 設定**: `/content/drive/MyDrive/hls-video-player/media` を指す（Drive 実体を直接使用）
-6. **起動**: FastAPI + Gradio を同一プロセスで立ち上げ、`share=True` で `*.gradio.live` の公開 URL を発行
+5. **`MEDIA_ROOT` 設定**: `{LOCAL_ROOT}/media`（symlink 経由で Drive を指す）
+6. **起動 (外部アクセス可)**:
+   - FastAPI (Gradio + `/hls` + `/sprites` + `/api` + `/player`) を port 7860 で立ち上げ
+   - Gradio の `setup_tunnel` で `*.gradio.live` の公開 URL を発行
+   - `demo.launch(share=True)` だと Gradio 単体用の別サーバが立ち、`/hls/*` 等が share URL で見えなくなる。本方式なら全ルートが 1 本の URL 配下でアクセス可能
 
 ### コード更新時
 
