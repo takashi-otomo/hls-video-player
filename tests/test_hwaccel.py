@@ -23,8 +23,9 @@ def _clear_cache():
 def cuda_runtime_ok(monkeypatch):
     """CUDA runtime 可用性をテスト用に True 固定。check_output モックと干渉しない。"""
     hwaccel.detect_cuda_runtime.cache_clear()
-    # lru_cache を剥いだシンプル関数に差し替える（cache_clear を呼ばれても壊れないよう保護）
-    replacement = lambda: True  # noqa: E731
+    # detect_cuda_runtime は ffmpeg_path 引数を受けるので *a/**kw で吸収。
+    # cache_clear を呼ばれても壊れないよう no-op で防御。
+    replacement = lambda *_a, **_kw: True  # noqa: E731
     replacement.cache_clear = lambda: None  # type: ignore[attr-defined]
     monkeypatch.setattr(hwaccel, "detect_cuda_runtime", replacement)
 
@@ -49,7 +50,7 @@ class TestDetectNvenc:
             hwaccel.subprocess, "check_output",
             lambda *_a, **_kw: _encoders_output(with_nvenc=True),
         )
-        replacement = lambda: False  # noqa: E731
+        replacement = lambda *_a, **_kw: False  # noqa: E731
         replacement.cache_clear = lambda: None  # type: ignore[attr-defined]
         monkeypatch.setattr(hwaccel, "detect_cuda_runtime", replacement)
         assert hwaccel.detect_nvenc("ffmpeg") is False
@@ -68,25 +69,39 @@ class TestDetectNvenc:
         assert hwaccel.detect_nvenc("/nope/ffmpeg") is False
 
 
+class _FakeCompleted:
+    def __init__(self, rc: int, stderr: bytes = b""):
+        self.returncode = rc
+        self.stderr = stderr
+        self.stdout = b""
+
+
 class TestDetectCudaRuntime:
-    def test_true_when_nvidia_smi_succeeds(self, monkeypatch):
-        # subprocess.check_output をモックすれば nvidia-smi -L 呼び出しがそのまま通る
+    def test_true_when_ffmpeg_init_succeeds(self, monkeypatch):
         monkeypatch.setattr(
-            hwaccel.subprocess, "check_output",
-            lambda *_a, **_kw: b"GPU 0: Tesla T4\n",
+            hwaccel.subprocess, "run",
+            lambda *_a, **_kw: _FakeCompleted(rc=0),
         )
         assert hwaccel.detect_cuda_runtime() is True
 
-    def test_false_when_nvidia_smi_missing(self, monkeypatch):
-        def boom(*_a, **_kw):
-            raise FileNotFoundError
-        monkeypatch.setattr(hwaccel.subprocess, "check_output", boom)
+    def test_false_when_ffmpeg_init_fails(self, monkeypatch):
+        """ffmpeg -init_hw_device cuda が non-zero で終わる = CUDA 実行時不可。"""
+        monkeypatch.setattr(
+            hwaccel.subprocess, "run",
+            lambda *_a, **_kw: _FakeCompleted(rc=1, stderr=b"Cannot load libcuda.so.1"),
+        )
         assert hwaccel.detect_cuda_runtime() is False
 
-    def test_false_when_nvidia_smi_nonzero(self, monkeypatch):
+    def test_false_when_ffmpeg_missing(self, monkeypatch):
         def boom(*_a, **_kw):
-            raise hwaccel.subprocess.CalledProcessError(1, "nvidia-smi")
-        monkeypatch.setattr(hwaccel.subprocess, "check_output", boom)
+            raise FileNotFoundError
+        monkeypatch.setattr(hwaccel.subprocess, "run", boom)
+        assert hwaccel.detect_cuda_runtime() is False
+
+    def test_false_on_timeout(self, monkeypatch):
+        def boom(*_a, **_kw):
+            raise hwaccel.subprocess.TimeoutExpired("ffmpeg", 15)
+        monkeypatch.setattr(hwaccel.subprocess, "run", boom)
         assert hwaccel.detect_cuda_runtime() is False
 
 
@@ -163,7 +178,7 @@ class TestDetectCuvid:
             hwaccel.subprocess, "check_output",
             lambda *_a, **_kw: _decoders_output(["h264_cuvid"]),
         )
-        replacement = lambda: False  # noqa: E731
+        replacement = lambda *_a, **_kw: False  # noqa: E731
         replacement.cache_clear = lambda: None  # type: ignore[attr-defined]
         monkeypatch.setattr(hwaccel, "detect_cuda_runtime", replacement)
         assert hwaccel.detect_cuvid("h264") is None

@@ -35,29 +35,39 @@ CUVID_DECODERS: dict[str, str] = {
 }
 
 
-@functools.lru_cache(maxsize=1)
-def detect_cuda_runtime() -> bool:
-    """CUDA ドライバ (libcuda) が実行時にロード可能か確認する。
+@functools.lru_cache(maxsize=8)
+def detect_cuda_runtime(ffmpeg_path: str = "ffmpeg") -> bool:
+    """CUDA ドライバが ffmpeg から実際にロード可能かを確認する。
 
-    `ffmpeg -encoders` には `h264_nvenc` があっても、Colab で CPU ランタイムを
-    選んでいたり GPU が使えない環境だと実行時に `Cannot load libcuda.so.1` で
-    落ちる。このため「バイナリに含まれている」ではなく **nvidia-smi で
-    実際の GPU を確認** することで確実に判定する。
+    nvidia-smi が通る環境でも、Colab など `libcuda.so.1` のパス設定次第で
+    ffmpeg からは `Cannot load libcuda.so.1` となるケースがある。このため
+    **実際に `ffmpeg -init_hw_device cuda` を呼んで CUDA デバイスを初期化**
+    してみる。成功すれば NVENC / CUVID が安全に使える。
     """
     t0 = time.monotonic()
     try:
-        subprocess.check_output(
-            ["nvidia-smi", "-L"],
-            stderr=subprocess.STDOUT, timeout=5,
+        result = subprocess.run(
+            [
+                ffmpeg_path, "-v", "error",
+                "-init_hw_device", "cuda=c",
+                "-f", "lavfi", "-i", "nullsrc=s=64x64:d=0.01",
+                "-f", "null", "-",
+            ],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            timeout=15,
         )
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+    except (OSError, subprocess.TimeoutExpired) as e:
+        logger.info("CUDA runtime check failed to spawn: %s", e.__class__.__name__)
+        return False
+    elapsed = time.monotonic() - t0
+    if result.returncode != 0:
+        tail = (result.stderr or b"").decode(errors="ignore").strip()[-300:]
         logger.info(
-            "CUDA runtime unavailable (no GPU / driver): %s", e.__class__.__name__,
+            "CUDA runtime unavailable (ffmpeg rc=%d elapsed=%.2fs): %s",
+            result.returncode, elapsed, tail,
         )
         return False
-    logger.info(
-        "CUDA runtime available (elapsed=%.2fs)", time.monotonic() - t0,
-    )
+    logger.info("CUDA runtime available (init elapsed=%.2fs)", elapsed)
     return True
 
 
@@ -83,7 +93,7 @@ def detect_nvenc(ffmpeg_path: str = "ffmpeg") -> bool:
     if not built_in:
         logger.info("NVENC: binary does not include h264_nvenc")
         return False
-    runtime = detect_cuda_runtime()
+    runtime = detect_cuda_runtime(ffmpeg_path)
     logger.info(
         "NVENC detection: binary=yes runtime=%s (ffmpeg=%s elapsed=%.2fs)",
         runtime, ffmpeg_path, time.monotonic() - t0,
@@ -134,7 +144,7 @@ def detect_cuvid(input_codec: str, ffmpeg_path: str = "ffmpeg") -> Optional[str]
     decoders = _list_decoders(ffmpeg_path)
     if cuvid not in decoders:
         return None
-    if not detect_cuda_runtime():
+    if not detect_cuda_runtime(ffmpeg_path):
         return None
     return cuvid
 

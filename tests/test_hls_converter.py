@@ -5,7 +5,12 @@ NVENC / CPU の両バックエンドと filter_complex split を検証。
 
 import pytest
 
-from hls_video.hls_converter import DEFAULT_VARIANTS, build_ffmpeg_args
+from hls_video.hls_converter import (
+    DEFAULT_VARIANTS,
+    _is_cuda_runtime_error,
+    build_ffmpeg_args,
+    convert_mp4_to_hls,
+)
 
 
 def _find_all(args, key):
@@ -249,6 +254,83 @@ class TestPortraitScaling:
         fc = args[args.index("-filter_complex") + 1]
         for v in DEFAULT_VARIANTS:
             assert f"scale=w={v['height']}:h=-2" in fc
+
+
+class TestCudaRuntimeErrorDetection:
+    def test_matches_cannot_load_libcuda(self):
+        err = "ffmpeg ... Cannot load libcuda.so.1 ... Conversion failed!"
+        assert _is_cuda_runtime_error(err) is True
+
+    def test_matches_device_creation_failed(self):
+        assert _is_cuda_runtime_error("Device creation failed: -1313558101.") is True
+
+    def test_matches_device_setup_failed(self):
+        assert _is_cuda_runtime_error("Device setup failed for decoder") is True
+
+    def test_does_not_match_unrelated_error(self):
+        assert _is_cuda_runtime_error("Invalid argument: -z") is False
+        assert _is_cuda_runtime_error("No such file or directory") is False
+
+
+class TestConvertMp4ToHlsFallback:
+    """NVENC/CUVID が runtime で落ちたとき CPU で再実行する。"""
+
+    def test_falls_back_to_cpu_on_cuda_runtime_error(self, tmp_path, monkeypatch):
+        import hls_video.hls_converter as mod
+
+        # nvenc + cuvid 経路に確定させる
+        monkeypatch.setattr(mod, "resolve_hwaccel", lambda *_a, **_kw: "nvenc")
+        monkeypatch.setattr(mod, "resolve_cuvid", lambda *_a, **_kw: "h264_cuvid")
+
+        calls: list[list[str]] = []
+
+        def fake_run_ffmpeg(args, on_progress=None, label=None):
+            calls.append(list(args))
+            if len(calls) == 1:
+                # 1回目 (NVENC+CUVID) で CUDA エラー
+                raise RuntimeError(
+                    "ffmpeg exited with code 1\n"
+                    "... Cannot load libcuda.so.1 ...\n"
+                    "Device setup failed for decoder on input stream #0:0"
+                )
+            # 2回目 (CPU) は成功
+
+        monkeypatch.setattr(mod, "run_ffmpeg", fake_run_ffmpeg)
+
+        out = tmp_path / "hls" / "vid"
+        res = convert_mp4_to_hls(
+            input_path="/tmp/in.mp4", output_dir=str(out),
+            input_codec="h264", duration_seconds=10.0,
+        )
+        assert len(calls) == 2, "CUDA エラー後に CPU で再試行するはず"
+        # 1 回目は nvenc + cuvid
+        first = calls[0]
+        assert "h264_nvenc" in first
+        assert "h264_cuvid" in first
+        # 2 回目は CPU（libx264 encoder=h264, hwaccel なし）
+        second = calls[1]
+        assert "h264_nvenc" not in second
+        assert "h264_cuvid" not in second
+        assert "-hwaccel" not in second
+        assert res["backend"] == "cpu"
+
+    def test_does_not_retry_on_non_cuda_error(self, tmp_path, monkeypatch):
+        """CUDA 以外のエラーでは再試行しない（元の例外を再 raise）。"""
+        import hls_video.hls_converter as mod
+        monkeypatch.setattr(mod, "resolve_hwaccel", lambda *_a, **_kw: "nvenc")
+        monkeypatch.setattr(mod, "resolve_cuvid", lambda *_a, **_kw: None)
+
+        def boom(args, on_progress=None, label=None):
+            raise RuntimeError("Invalid argument -z")
+
+        monkeypatch.setattr(mod, "run_ffmpeg", boom)
+
+        out = tmp_path / "hls" / "vid2"
+        with pytest.raises(RuntimeError):
+            convert_mp4_to_hls(
+                input_path="/tmp/in.mp4", output_dir=str(out),
+                input_codec="h264", duration_seconds=10.0,
+            )
 
 
 class TestVariantSubset:

@@ -30,9 +30,29 @@ from hls_video.config import (
     ffmpeg_variants_filter,
 )
 from hls_video.ffmpeg_runner import run_ffmpeg
-from hls_video.hwaccel import Backend, resolve_cuvid, resolve_hwaccel
+from hls_video.hwaccel import (
+    Backend, _list_decoders, detect_cuda_runtime, detect_nvenc,
+    resolve_cuvid, resolve_hwaccel,
+)
 from hls_video.master_playlist import build_master_playlist
 from hls_video.progress_parser import create_progress_parser
+
+# ffmpeg が返す CUDA 関連エラーの代表パターン。どれかに該当したら
+# NVENC/CUVID が runtime-unavailable と見なして CPU に切り替えて再実行する。
+_CUDA_ERROR_MARKERS = (
+    "Cannot load libcuda",
+    "Could not dynamically load CUDA",
+    "Device creation failed",
+    "Device setup failed",
+    "No device available",
+    "Cannot load libnvcuvid",
+    "NVENC capability",
+    "OpenEncodeSessionEx failed",
+)
+
+
+def _is_cuda_runtime_error(message: str) -> bool:
+    return any(m in message for m in _CUDA_ERROR_MARKERS)
 
 logger = logging.getLogger(__name__)
 
@@ -317,12 +337,51 @@ def convert_mp4_to_hls(
         portrait=portrait, cuvid_decoder=cuvid_decoder, bframes=bframes_,
     )
 
-    stderr_handler = (
-        create_progress_parser(duration_seconds=duration_seconds, on_ratio=on_progress)
-        if on_progress is not None
-        else None
-    )
-    run_ffmpeg(args, on_progress=stderr_handler, label=f"hls:{Path(output_dir).name}")
+    def _make_handler():
+        return (
+            create_progress_parser(duration_seconds=duration_seconds, on_ratio=on_progress)
+            if on_progress is not None
+            else None
+        )
+
+    label = f"hls:{Path(output_dir).name}"
+    try:
+        run_ffmpeg(args, on_progress=_make_handler(), label=label)
+    except RuntimeError as err:
+        # NVENC/CUVID 関連の runtime エラーなら CPU にフォールバックして再実行。
+        # detect_cuda_runtime は判定に成功しても ffmpeg 側の lib 読み込みで
+        # 落ちることがあるので、最後の砦として保険を入れる。
+        if backend == "nvenc" and _is_cuda_runtime_error(str(err)):
+            logger.warning(
+                "NVENC/CUVID failed at runtime; falling back to CPU (libx264). "
+                "error tail=%s", str(err)[-240:].replace("\n", " "),
+            )
+            # キャッシュを無効化: 次のジョブは最初から CPU 経路
+            detect_nvenc.cache_clear()
+            _list_decoders.cache_clear()
+            detect_cuda_runtime.cache_clear()
+            # 不完全な出力を掃除してから再実行
+            if out.exists():
+                for f in out.iterdir():
+                    try:
+                        f.unlink()
+                    except OSError:
+                        pass
+            backend = "cpu"
+            cuvid_decoder = None
+            args = build_ffmpeg_args(
+                input_path=input_path, output_dir=str(out), variants=selected,
+                segment_seconds=segment_seconds, gop=gop, backend=backend,
+                preset=preset_, threads=threads_, nvenc_preset=nvenc_preset_,
+                portrait=portrait, cuvid_decoder=None, bframes=bframes_,
+            )
+            logger.info(
+                "HLS encode (retry): backend=cpu preset=%s threads=%d",
+                preset_, threads_,
+            )
+            run_ffmpeg(args, on_progress=_make_handler(), label=label)
+        else:
+            raise
 
     master = build_master_playlist([
         {"bandwidth": v["bandwidth"], "resolution": v["resolution"],
@@ -334,7 +393,7 @@ def convert_mp4_to_hls(
     return {
         "master_path": str(out / "master.m3u8"),
         "variants": [v["name"] for v in selected],
-        "backend": backend,
+        "backend": backend,  # fallback 後は "cpu" に更新されている
         "cuvid": cuvid_decoder,
         "bframes": bframes_,
     }
