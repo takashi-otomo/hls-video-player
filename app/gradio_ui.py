@@ -15,6 +15,7 @@ from hls_video.config import max_concurrent_jobs, media_root
 from hls_video.conversion_runner import run_conversion
 from hls_video.drive_browser import import_file, list_videos_under
 from hls_video.job_registry import Job, JobRegistry
+from hls_video.logging_setup import setup_logging
 from hls_video.source_catalog import (
     delete_source_file, list_sources, resolve_video_id, VIDEO_EXTS,
 )
@@ -148,6 +149,10 @@ def build_ui(
     media_dir: Path | None = None,
     registry: JobRegistry | None = None,
 ) -> gr.Blocks:
+    # build_ui は Colab ノートブック側からも呼ばれる（app.main を通らない）ので、
+    # どの経路でも stdout に INFO ログが出るようここで初期化する。
+    setup_logging()
+
     media_dir = media_dir or media_root()
     registry = registry or JobRegistry(max_workers=max_concurrent_jobs())
 

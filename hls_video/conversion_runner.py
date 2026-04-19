@@ -64,6 +64,13 @@ def run_conversion(
             progress=0.0, last_progress_at=now_iso(),
         )
 
+        # Drive FUSE 経由の大容量 MP4 は moov atom スキャンで数十秒〜数分
+        # 固まることがある。呼び出し前後で明示的にログを出す。
+        logger.info(
+            "[%s] probing duration (may take a while on Drive-mounted large files)",
+            video_id,
+        )
+
         t_probe = time.monotonic()
         duration = probe_duration_seconds(str(input_path))
         logger.info(

@@ -93,20 +93,66 @@ def run_ffmpeg(
     return stderr_text
 
 
-def run_ffprobe_json(args: list[str], *, ffprobe_path: Optional[str] = None) -> dict:
-    result = subprocess.run(
-        [ffprobe_path or _default_ffprobe(), *args],
-        capture_output=True,
+def run_ffprobe_json(
+    args: list[str],
+    *,
+    ffprobe_path: Optional[str] = None,
+    label: Optional[str] = None,
+) -> dict:
+    """ffprobe をブロッキング実行。
+
+    Drive FUSE 上の大きな MP4 では moov atom のスキャンで数十秒〜数分かかる
+    ことがあるため、10 秒ごとに heartbeat ログを出して「まだ生きている」
+    ことを可視化する。
+    """
+    import threading
+    tag = f"[{label}]" if label else ""
+    exe = ffprobe_path or _default_ffprobe()
+
+    # 入力パスを引数から抜き出してログに載せる
+    input_hint = args[-1] if args else ""
+    logger.info("%s ffprobe start input=%s", tag, input_hint)
+
+    t0 = time.monotonic()
+    proc = subprocess.Popen(
+        [exe, *args],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
     )
-    if result.returncode != 0:
+
+    # heartbeat: 10 秒ごとに「まだ走ってる」と報告
+    heartbeat_stop = threading.Event()
+
+    def _heartbeat() -> None:
+        while not heartbeat_stop.wait(10):
+            elapsed = time.monotonic() - t0
+            logger.info("%s ffprobe still running... (elapsed %.0fs)", tag, elapsed)
+
+    threading.Thread(target=_heartbeat, daemon=True).start()
+
+    try:
+        stdout, stderr = proc.communicate()
+    finally:
+        heartbeat_stop.set()
+
+    elapsed = time.monotonic() - t0
+    if proc.returncode != 0:
+        logger.error("%s ffprobe FAILED rc=%d elapsed=%.1fs stderr=%s",
+                     tag, proc.returncode, elapsed, (stderr or "")[-500:])
         raise RuntimeError(
-            f"ffprobe exited with code {result.returncode}\n{result.stderr}"
+            f"ffprobe exited with code {proc.returncode}\n{stderr}"
         )
-    return json.loads(result.stdout)
+    logger.info("%s ffprobe done rc=0 elapsed=%.1fs", tag, elapsed)
+    return json.loads(stdout)
 
 
-def probe_duration_seconds(input_path: str, *, ffprobe_path: Optional[str] = None) -> float:
+def probe_duration_seconds(
+    input_path: str,
+    *,
+    ffprobe_path: Optional[str] = None,
+) -> float:
     data = run_ffprobe_json(
         [
             "-v", "error",
@@ -115,6 +161,7 @@ def probe_duration_seconds(input_path: str, *, ffprobe_path: Optional[str] = Non
             input_path,
         ],
         ffprobe_path=ffprobe_path,
+        label=f"probe:{os.path.basename(input_path)}",
     )
     return float(data.get("format", {}).get("duration", 0) or 0)
 
