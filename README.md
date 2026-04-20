@@ -128,12 +128,22 @@ NVENC + CUVID の組合せで decode / scale / encode を全て GPU 上で完結
 | 環境 | 実時間あたり変換速度 |
 |---|---|
 | CPU (libx264, preset=ultrafast) | 1〜2x |
-| NVIDIA GPU + CPU decode (h264_nvenc, p4) | **3〜5x**（既定） |
-| NVIDIA GPU + CUVID (+ `scale_cuda`) | 5〜10x（`FFMPEG_CUVID=auto` で有効化） |
+| NVIDIA GPU + CPU decode (h264_nvenc, p4) | 3〜5x |
+| NVIDIA GPU + CUVID (+ `scale_cuda`) | **8〜15x**（`FFMPEG_CUVID=auto` + `LD_LIBRARY_PATH` 適切時） |
 
-> CUVID は `ffmpeg -init_hw_device cuda` で成功する環境でのみ安全に動くため既定 off。
-> Colab など環境によっては libcuda.so.1 のロードで落ちるため、動作確認済みの環境で
-> 明示的に `FFMPEG_CUVID=auto` にする運用を推奨します。
+### Colab T4 での CUVID 有効化
+
+Colab T4 ランタイムは `libcuda.so.1` / `libnvcuvid.so.1` を **`/usr/lib64-nvidia/`** に
+配置しますが、`ldconfig` のサーチパスから外れているため apt ffmpeg の `dlopen()` が
+失敗します。Python プロセス起動前に下記を設定すれば解決します:
+
+```python
+import os
+os.environ["LD_LIBRARY_PATH"] = "/usr/lib64-nvidia:" + os.environ.get("LD_LIBRARY_PATH", "")
+```
+
+`colab_launch.ipynb` のセル 2 で自動設定済み。設定後 `FFMPEG_CUVID=auto` で CUVID が
+自動選択されます（対応 codec = h264 / hevc / vp9 / av1 等）。
 
 ### 軽量化プリセット
 
