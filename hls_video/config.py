@@ -108,6 +108,31 @@ def ffmpeg_variants_filter() -> list[str] | None:
     return [s.strip() for s in raw.split(",") if s.strip()]
 
 
+def ffmpeg_audio_copy() -> bool:
+    """音声を再エンコードせず `-c:a copy` で通すか。既定 False。
+
+    入力音声が AAC で HLS 出力もそのまま AAC でよい場合、音声の decode+encode
+    を省略して 5% 程度高速化できる。入力が非 AAC (MP3, PCM 等) のときに有効化
+    すると HLS プレイヤーで再生できなくなる可能性があるため要注意。
+    """
+    raw = os.environ.get("FFMPEG_AUDIO_COPY", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def ffmpeg_x264_tune() -> str | None:
+    """libx264 の `-tune` オプション。未指定なら付けない。
+
+    代表値:
+    - "zerolatency": B-frames 無効・lookahead 無効で 10-20% 速度向上 (速度優先)
+    - "fastdecode": 再生側 decode 負荷を軽減 (encode 側の効果は限定的)
+    - "film" / "animation" / "grain": 画質優先 (速度下がる)
+
+    CPU fallback 時のみ効く。NVENC は独自の preset 体系なので無視される。
+    """
+    raw = os.environ.get("FFMPEG_X264_TUNE", "").strip()
+    return raw or None
+
+
 def ffmpeg_nice() -> int | None:
     """FFMPEG_NICE が設定されていれば int として返す。未設定なら None。"""
     raw = os.environ.get("FFMPEG_NICE")

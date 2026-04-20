@@ -90,6 +90,31 @@ class TestBuildFfmpegArgsCPU:
             assert f"[vo{i}]" in maps
         assert maps.count("0:a:0?") == 4
 
+    def test_tune_flag_propagates_to_all_variants(self):
+        args = self._args(x264_tune="zerolatency")
+        tunes = [args[i + 1] for i in _find_all(args, "-tune")]
+        assert tunes == ["zerolatency"] * 4
+
+    def test_no_tune_flag_when_none(self):
+        args = self._args(x264_tune=None)
+        assert "-tune" not in args
+
+    def test_audio_copy_replaces_aac_encoding(self):
+        args = self._args(audio_copy=True)
+        # 各 variant で -c:a copy が出る (4 variant)
+        ca = [args[i + 1] for i in _find_all(args, "-c:a")]
+        assert ca == ["copy"] * 4
+        # -b:a (audio bitrate) は出ない
+        assert "-b:a" not in args
+
+    def test_audio_encoded_by_default(self):
+        args = self._args()
+        ca = [args[i + 1] for i in _find_all(args, "-c:a")]
+        assert ca == ["aac"] * 4
+        # -b:a が各 variant に付く
+        ba = [args[i + 1] for i in _find_all(args, "-b:a")]
+        assert len(ba) == 4
+
 
 class TestBuildFfmpegArgsNVENC:
     def _args(self, **overrides):

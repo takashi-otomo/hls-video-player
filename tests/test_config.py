@@ -18,6 +18,8 @@ def _clean_env(monkeypatch):
         "FFMPEG_CUVID",
         "FFMPEG_BFRAMES",
         "FFMPEG_VARIANTS",
+        "FFMPEG_AUDIO_COPY",
+        "FFMPEG_X264_TUNE",
         "FFMPEG_NICE",
         "MAX_CONCURRENT_JOBS",
     ]:
@@ -103,6 +105,36 @@ def test_ffmpeg_bframes_invalid_returns_none(monkeypatch):
 def test_ffmpeg_bframes_negative_clamped_to_zero(monkeypatch):
     monkeypatch.setenv("FFMPEG_BFRAMES", "-2")
     assert config.ffmpeg_bframes() == 0
+
+
+def test_ffmpeg_audio_copy_default_false():
+    assert config.ffmpeg_audio_copy() is False
+
+
+def test_ffmpeg_audio_copy_truthy_values(monkeypatch):
+    for val in ("1", "true", "YES", "on"):
+        monkeypatch.setenv("FFMPEG_AUDIO_COPY", val)
+        assert config.ffmpeg_audio_copy() is True, f"failed for {val}"
+
+
+def test_ffmpeg_audio_copy_falsy_values(monkeypatch):
+    for val in ("0", "false", "no", "off", ""):
+        monkeypatch.setenv("FFMPEG_AUDIO_COPY", val)
+        assert config.ffmpeg_audio_copy() is False, f"failed for {val!r}"
+
+
+def test_ffmpeg_x264_tune_default_none():
+    assert config.ffmpeg_x264_tune() is None
+
+
+def test_ffmpeg_x264_tune_env_override(monkeypatch):
+    monkeypatch.setenv("FFMPEG_X264_TUNE", "zerolatency")
+    assert config.ffmpeg_x264_tune() == "zerolatency"
+
+
+def test_ffmpeg_x264_tune_empty_returns_none(monkeypatch):
+    monkeypatch.setenv("FFMPEG_X264_TUNE", "   ")
+    assert config.ffmpeg_x264_tune() is None
 
 
 def test_ffmpeg_variants_filter_splits_csv(monkeypatch):

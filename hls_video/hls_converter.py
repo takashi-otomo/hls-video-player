@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Callable, Literal, Optional, TypedDict
 
 from hls_video.config import (
+    ffmpeg_audio_copy,
     ffmpeg_bframes,
     ffmpeg_cuvid,
     ffmpeg_hwaccel,
@@ -28,6 +29,7 @@ from hls_video.config import (
     ffmpeg_preset,
     ffmpeg_threads,
     ffmpeg_variants_filter,
+    ffmpeg_x264_tune,
 )
 from hls_video.ffmpeg_runner import run_ffmpeg
 from hls_video.hwaccel import (
@@ -166,16 +168,31 @@ def _cpu_variant_output_args(
     gop: int,
     preset: str,
     threads: int,
+    tune: Optional[str] = None,
+    audio_copy: bool = False,
 ) -> list[str]:
-    """CPU (libx264) の 1 variant 分 -map + エンコーダ引数。"""
+    """CPU (libx264) の 1 variant 分 -map + エンコーダ引数。
+
+    - `tune`: libx264 の `-tune` 値 (zerolatency / fastdecode 等)。None で付与しない。
+    - `audio_copy=True`: 音声を `-c:a copy` で再エンコードせず通す (AAC 入力前提)。
+    """
     playlist = os.path.join(out_dir, f"{variant['name']}.m3u8")
     seg_pattern = os.path.join(out_dir, f"{variant['name']}_%03d.ts")
-    return [
-        "-map", map_label,
-        "-map", "0:a:0?",
-        "-c:a", "aac", "-ar", "48000", "-b:a", variant["audio_bitrate"],
+    args: list[str] = ["-map", map_label, "-map", "0:a:0?"]
+    if audio_copy:
+        # 再エンコード省略。入力が AAC 以外だと HLS 互換性を失うので env 任意制御。
+        args.extend(["-c:a", "copy"])
+    else:
+        args.extend([
+            "-c:a", "aac", "-ar", "48000", "-b:a", variant["audio_bitrate"],
+        ])
+    args.extend([
         "-c:v", "h264", "-profile:v", "main",
         "-preset", preset,
+    ])
+    if tune:
+        args.extend(["-tune", tune])
+    args.extend([
         "-threads", str(threads),
         "-crf", str(variant["crf"]),
         "-pix_fmt", "yuv420p",
@@ -188,7 +205,8 @@ def _cpu_variant_output_args(
         "-hls_playlist_type", "vod",
         "-hls_segment_filename", seg_pattern,
         "-f", "hls", playlist,
-    ]
+    ])
+    return args
 
 
 def _nvenc_variant_output_args(
@@ -200,6 +218,7 @@ def _nvenc_variant_output_args(
     gop: int,
     preset: str,
     bframes: Optional[int],
+    audio_copy: bool = False,
 ) -> list[str]:
     """NVENC (h264_nvenc) の 1 variant 分。
 
@@ -212,16 +231,20 @@ def _nvenc_variant_output_args(
     """
     playlist = os.path.join(out_dir, f"{variant['name']}.m3u8")
     seg_pattern = os.path.join(out_dir, f"{variant['name']}_%03d.ts")
-    args = [
-        "-map", map_label,
-        "-map", "0:a:0?",
-        "-c:a", "aac", "-ar", "48000", "-b:a", variant["audio_bitrate"],
+    args: list[str] = ["-map", map_label, "-map", "0:a:0?"]
+    if audio_copy:
+        args.extend(["-c:a", "copy"])
+    else:
+        args.extend([
+            "-c:a", "aac", "-ar", "48000", "-b:a", variant["audio_bitrate"],
+        ])
+    args.extend([
         "-c:v", "h264_nvenc",
         "-profile:v", "main",
         "-preset", preset,
         "-rc", "vbr",
         "-cq", str(variant["crf"]),
-    ]
+    ])
     if bframes is not None:
         args.extend(["-bf", str(bframes)])
     args.extend([
@@ -253,6 +276,8 @@ def build_ffmpeg_args(
     cuvid_decoder: Optional[str] = None,
     bframes: Optional[int] = None,
     interlaced: bool = False,
+    x264_tune: Optional[str] = None,
+    audio_copy: bool = False,
 ) -> list[str]:
     """フル ffmpeg 引数を組み立てる。
 
@@ -289,13 +314,14 @@ def build_ffmpeg_args(
             args.extend(_nvenc_variant_output_args(
                 v, out_dir=output_dir, map_label=label,
                 segment_seconds=segment_seconds, gop=gop, preset=nvenc_preset,
-                bframes=bframes,
+                bframes=bframes, audio_copy=audio_copy,
             ))
         else:
             args.extend(_cpu_variant_output_args(
                 v, out_dir=output_dir, map_label=label,
                 segment_seconds=segment_seconds, gop=gop,
                 preset=preset, threads=threads,
+                tune=x264_tune, audio_copy=audio_copy,
             ))
     return args
 
@@ -356,6 +382,8 @@ def convert_mp4_to_hls(
     nvenc_preset_ = nvenc_preset or ffmpeg_nvenc_preset()
     threads_ = threads if threads is not None else ffmpeg_threads()
     bframes_ = bframes if bframes is not None else ffmpeg_bframes()  # None 可
+    x264_tune_ = ffmpeg_x264_tune()
+    audio_copy_ = ffmpeg_audio_copy()
 
     # CUVID decoder 解決。NVENC バックエンド時のみ有効。
     cuvid_decoder: Optional[str] = None
@@ -393,7 +421,7 @@ def convert_mp4_to_hls(
         segment_seconds=segment_seconds, gop=gop, backend=backend,
         preset=preset_, threads=threads_, nvenc_preset=nvenc_preset_,
         portrait=portrait, cuvid_decoder=cuvid_decoder, bframes=bframes_,
-        interlaced=interlaced,
+        interlaced=interlaced, x264_tune=x264_tune_, audio_copy=audio_copy_,
     )
 
     def _make_handler():
@@ -433,7 +461,7 @@ def convert_mp4_to_hls(
                 segment_seconds=segment_seconds, gop=gop, backend=backend,
                 preset=preset_, threads=threads_, nvenc_preset=nvenc_preset_,
                 portrait=portrait, cuvid_decoder=None, bframes=bframes_,
-                interlaced=interlaced,
+                interlaced=interlaced, x264_tune=x264_tune_, audio_copy=audio_copy_,
             )
             logger.info(
                 "HLS encode (retry): backend=cpu preset=%s threads=%d",
