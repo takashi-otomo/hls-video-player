@@ -40,6 +40,7 @@ from hls_video.progress_parser import create_progress_parser
 # ffmpeg が返す CUDA 関連エラーの代表パターン。どれかに該当したら
 # NVENC/CUVID が runtime-unavailable と見なして CPU に切り替えて再実行する。
 _CUDA_ERROR_MARKERS = (
+    # libcuda / driver 関連
     "Cannot load libcuda",
     "Could not dynamically load CUDA",
     "Device creation failed",
@@ -48,6 +49,18 @@ _CUDA_ERROR_MARKERS = (
     "Cannot load libnvcuvid",
     "NVENC capability",
     "OpenEncodeSessionEx failed",
+    # scale_cuda / filter graph の format negotiation 失敗
+    # (ffmpeg 4.4.x で scale_cuda:format=yuv420p が抜けていると発生)
+    "scale_cuda",
+    "Impossible to convert between the formats",
+    "Error reinitializing filters",
+    "Failed to inject frame into filter network",
+    # GPU メモリ不足 (複数 variant を同時 encode して OOM になるケース)
+    "CUDA_ERROR_OUT_OF_MEMORY",
+    "Failed to allocate CUDA frame",
+    # CUVID 固有: driver-encoder version ミスマッチ
+    "CUDA_ERROR_INVALID_CONTEXT",
+    "cuvidParseVideoData",
 )
 
 
@@ -102,6 +115,7 @@ def _filter_complex_split(
     *,
     portrait: bool = False,
     scale_filter: str = "scale",
+    interlaced_cpu: bool = False,
 ) -> str:
     """1 decode → N scale への split チェーンを組む。
 
@@ -111,22 +125,33 @@ def _filter_complex_split(
     - `scale_filter`: `scale` (CPU) か `scale_cuda` (CUVID decode 時)。
       scale_cuda は GPU メモリ上で解像度変換するので decode → scale → encode まで
       GPU に常駐し、メモリコピーが一切発生しない。ffmpeg 4.4 以降は
-      `force_original_aspect_ratio` / `force_divisible_by` オプション対応。
+      `force_original_aspect_ratio` / `force_divisible_by` / `format` オプション対応。
+
+      **scale_cuda は `:format=yuv420p` を明示しないと下流の NVENC との
+      pixel format negotiation に失敗して `Impossible to convert between
+      the formats` で落ちる**（ffmpeg 4.4.x の既知挙動）。
     """
     n = len(variants)
     labels = "".join(f"[v{i}]" for i in range(n))
-    parts = [f"[0:v]split={n}{labels}"]
+    if interlaced_cpu:
+        parts = [f"[0:v]yadif=mode=1,split={n}{labels}"]
+    else:
+        parts = [f"[0:v]split={n}{labels}"]
+    # scale_cuda のときだけ出力フォーマットを明示（NVENC は yuv420p を要求）
+    fmt_suffix = ":format=yuv420p" if scale_filter == "scale_cuda" else ""
     for i, v in enumerate(variants):
         short_edge = v["height"]
         if portrait:
             scale = (
                 f"{scale_filter}=w={short_edge}:h=-2:"
                 f"force_original_aspect_ratio=decrease:force_divisible_by=2"
+                f"{fmt_suffix}"
             )
         else:
             scale = (
                 f"{scale_filter}=w=-2:h={short_edge}:"
                 f"force_original_aspect_ratio=decrease:force_divisible_by=2"
+                f"{fmt_suffix}"
             )
         parts.append(f"[v{i}]{scale}[vo{i}]")
     return ";".join(parts)
@@ -227,28 +252,35 @@ def build_ffmpeg_args(
     portrait: bool = False,
     cuvid_decoder: Optional[str] = None,
     bframes: Optional[int] = None,
+    interlaced: bool = False,
 ) -> list[str]:
     """フル ffmpeg 引数を組み立てる。
 
     - `cuvid_decoder`: 非 None かつ backend="nvenc" のとき CUVID GPU decode を有効化。
       input 側に `-hwaccel cuda -hwaccel_output_format cuda -c:v <cuvid>` を追加し、
       filter_complex の scale を `scale_cuda` に置き換えて全工程を GPU 上で完結させる。
-    - `bframes`: NVENC 出力に `-bf <N>` を付与。0 で無効化（速度優先）。libx264 は未使用。
+    - `bframes`: NVENC 出力に `-bf <N>` を付与。None なら NVENC デフォルト。
+    - `interlaced`: True のとき CUVID/decoder に deinterlace を指示
+      (CUVID: `-deint 2` adaptive / CPU: `yadif` filter)。
     """
     use_cuvid = cuvid_decoder is not None and backend == "nvenc"
     filter_complex = _filter_complex_split(
         variants, portrait=portrait,
         scale_filter="scale_cuda" if use_cuvid else "scale",
+        interlaced_cpu=interlaced and not use_cuvid,
     )
 
     args: list[str] = ["-y"]
     if use_cuvid:
-        # -i の前に HW accel と decoder を指定する必要がある
+        # -i の前に HW accel と decoder オプションを指定する必要がある
         args.extend([
             "-hwaccel", "cuda",
             "-hwaccel_output_format", "cuda",
             "-c:v", cuvid_decoder,  # type: ignore[list-item]
         ])
+        if interlaced:
+            # CUVID 固有: 2 = adaptive deinterlace
+            args.extend(["-deint", "2"])
     args.extend(["-i", input_path, "-filter_complex", filter_complex])
 
     for i, v in enumerate(variants):
@@ -284,6 +316,8 @@ def convert_mp4_to_hls(
     input_width: Optional[int] = None,
     input_height: Optional[int] = None,
     input_codec: Optional[str] = None,
+    input_pix_fmt: Optional[str] = None,
+    input_field_order: Optional[str] = None,
     cuvid_mode: Optional[str] = None,
     bframes: Optional[int] = None,
 ) -> dict:
@@ -300,6 +334,22 @@ def convert_mp4_to_hls(
                 "FFMPEG_VARIANTS=%s does not match any variant; using full ladder",
                 names_filter,
             )
+
+    # 入力解像度より大きい variant をスキップ (拡大防止 + NVENC の最小解像度
+    # 145px 違反予防)。短辺ベースで判定。
+    if input_width and input_height:
+        short_edge = min(int(input_width), int(input_height))
+        usable = [v for v in selected if v["height"] <= short_edge]
+        if not usable:
+            # すべての variant が入力より大きい → 最小 variant を 1 本だけ残す
+            usable = [min(selected, key=lambda v: v["height"])]
+        if len(usable) != len(selected):
+            skipped = [v["name"] for v in selected if v not in usable]
+            logger.info(
+                "skipping variants larger than input short=%dpx: %s",
+                short_edge, skipped,
+            )
+            selected = usable
 
     backend: Backend = resolve_hwaccel(hwaccel or ffmpeg_hwaccel(), ffmpeg_path())
     preset_ = preset or ffmpeg_preset()
@@ -320,17 +370,21 @@ def convert_mp4_to_hls(
     gop = max(2, round(segment_seconds * fps))
 
     # orientation 判定: 縦動画（height > width）のとき portrait=True。
-    # 0/None の場合は landscape 扱い（既存挙動）。
     portrait = bool(
         input_width and input_height and int(input_height) > int(input_width)
     )
 
+    # interlaced 判定: ffprobe の field_order が "tt"/"bb"/"tb"/"bt" のとき interlaced。
+    # "progressive", "", "unknown" は progressive 扱い。
+    interlaced = (input_field_order or "").lower() in {"tt", "bb", "tb", "bt"}
+
     logger.info(
         "HLS encode: backend=%s variants=%s preset=%s nvenc_preset=%s "
-        "threads=%d gop=%d portrait=%s (in=%sx%s codec=%s) "
-        "cuvid=%s bframes=%s",
+        "threads=%d gop=%d portrait=%s interlaced=%s "
+        "(in=%sx%s codec=%s pix_fmt=%s) cuvid=%s bframes=%s",
         backend, [v["name"] for v in selected], preset_, nvenc_preset_,
-        threads_, gop, portrait, input_width, input_height, input_codec,
+        threads_, gop, portrait, interlaced,
+        input_width, input_height, input_codec, input_pix_fmt or "?",
         cuvid_decoder or "off", "default" if bframes_ is None else bframes_,
     )
 
@@ -339,6 +393,7 @@ def convert_mp4_to_hls(
         segment_seconds=segment_seconds, gop=gop, backend=backend,
         preset=preset_, threads=threads_, nvenc_preset=nvenc_preset_,
         portrait=portrait, cuvid_decoder=cuvid_decoder, bframes=bframes_,
+        interlaced=interlaced,
     )
 
     def _make_handler():
@@ -378,6 +433,7 @@ def convert_mp4_to_hls(
                 segment_seconds=segment_seconds, gop=gop, backend=backend,
                 preset=preset_, threads=threads_, nvenc_preset=nvenc_preset_,
                 portrait=portrait, cuvid_decoder=None, bframes=bframes_,
+                interlaced=interlaced,
             )
             logger.info(
                 "HLS encode (retry): backend=cpu preset=%s threads=%d",

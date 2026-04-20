@@ -96,13 +96,16 @@ def run_conversion(
             in_w = int(stream.get("width") or 0)
             in_h = int(stream.get("height") or 0)
             in_codec = str(stream.get("codec_name") or "")
+            in_pix_fmt = str(stream.get("pix_fmt") or "")
+            in_field_order = str(stream.get("field_order") or "")
         except Exception as e:
             # probe 失敗しても encode は landscape 前提 / CPU decode で続行
             logger.warning("[%s] video stream probe failed: %s", video_id, e)
-            in_w, in_h, in_codec = 0, 0, ""
+            in_w, in_h, in_codec, in_pix_fmt, in_field_order = 0, 0, "", "", ""
         logger.info(
-            "[%s] probe done: duration=%.1fs, size=%dx%d codec=%s (took %.1fs)",
+            "[%s] probe done: duration=%.1fs, size=%dx%d codec=%s pix_fmt=%s field=%s (took %.1fs)",
             video_id, duration, in_w, in_h, in_codec or "?",
+            in_pix_fmt or "?", in_field_order or "?",
             time.monotonic() - t_probe,
         )
         registry.update(
@@ -148,6 +151,8 @@ def run_conversion(
             input_width=in_w,
             input_height=in_h,
             input_codec=in_codec,
+            input_pix_fmt=in_pix_fmt,
+            input_field_order=in_field_order,
         )
         logger.info(
             "[%s] HLS stage done (%.1fs)",

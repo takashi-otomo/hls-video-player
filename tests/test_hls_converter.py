@@ -176,6 +176,42 @@ class TestBuildFfmpegArgsNVENCWithCuvid:
         kw.update(overrides)
         return build_ffmpeg_args(**kw)
 
+    def test_scale_cuda_has_format_yuv420p(self):
+        """scale_cuda に :format=yuv420p が必ず付く (NVENC negotiation 失敗対策)。"""
+        args = self._args()
+        fc = args[args.index("-filter_complex") + 1]
+        # 各 variant の scale_cuda 行に format=yuv420p が入っている
+        for v in DEFAULT_VARIANTS:
+            assert f"format=yuv420p" in fc
+        # scale_cuda を使う数だけ format=yuv420p が出る
+        assert fc.count("format=yuv420p") == len(DEFAULT_VARIANTS)
+
+    def test_cpu_scale_has_no_format_suffix(self):
+        """CPU scale には format=yuv420p を付けない (不要 + 下位互換)。"""
+        args = build_ffmpeg_args(
+            input_path="/tmp/in.mp4", output_dir="/out",
+            variants=DEFAULT_VARIANTS, segment_seconds=4, gop=48,
+            backend="cpu", preset="ultrafast", threads=0, nvenc_preset="p4",
+        )
+        fc = args[args.index("-filter_complex") + 1]
+        assert "format=yuv420p" not in fc
+
+    def test_interlaced_adds_deint_option(self):
+        """CUVID decode + interlaced → -deint 2 が decoder オプションに付く。"""
+        args = self._args(interlaced=True)
+        # -deint が -i より前にある (decoder option)
+        i_idx = args.index("-i")
+        pre_input = args[:i_idx]
+        deint_idx = pre_input.index("-deint")
+        assert pre_input[deint_idx + 1] == "2"
+        # scale_cuda chain には yadif が入らない
+        fc = args[args.index("-filter_complex") + 1]
+        assert "yadif" not in fc
+
+    def test_progressive_has_no_deint(self):
+        args = self._args(interlaced=False)
+        assert "-deint" not in args
+
     def test_hwaccel_cuda_prepended_before_input(self):
         args = self._args()
         # -hwaccel cuda / -hwaccel_output_format cuda が -i より前に出現
@@ -276,6 +312,19 @@ class TestCudaRuntimeErrorDetection:
     def test_matches_device_setup_failed(self):
         assert _is_cuda_runtime_error("Device setup failed for decoder") is True
 
+    def test_matches_scale_cuda_format_negotiation(self):
+        """scale_cuda:format 未指定の典型エラーを CUDA エラーとして扱う。"""
+        err = ("Impossible to convert between the formats supported by the "
+               "filter 'Parsed_scale_cuda_4' and the filter 'auto_scaler_0'")
+        assert _is_cuda_runtime_error(err) is True
+
+    def test_matches_filter_reinit(self):
+        assert _is_cuda_runtime_error("Error reinitializing filters!") is True
+
+    def test_matches_cuda_oom(self):
+        assert _is_cuda_runtime_error("CUDA_ERROR_OUT_OF_MEMORY") is True
+        assert _is_cuda_runtime_error("Failed to allocate CUDA frame") is True
+
     def test_does_not_match_unrelated_error(self):
         assert _is_cuda_runtime_error("Invalid argument: -z") is False
         assert _is_cuda_runtime_error("No such file or directory") is False
@@ -340,6 +389,74 @@ class TestConvertMp4ToHlsFallback:
                 input_path="/tmp/in.mp4", output_dir=str(out),
                 input_codec="h264", duration_seconds=10.0,
             )
+
+
+class TestInterlacedCpuYadif:
+    """CPU decode + interlaced → yadif が filter_complex に挿入される。"""
+
+    def test_cpu_interlaced_adds_yadif_before_split(self):
+        args = build_ffmpeg_args(
+            input_path="/tmp/in.mp4", output_dir="/out",
+            variants=DEFAULT_VARIANTS, segment_seconds=4, gop=48,
+            backend="cpu", preset="ultrafast", threads=0, nvenc_preset="p4",
+            interlaced=True,
+        )
+        fc = args[args.index("-filter_complex") + 1]
+        # yadif=mode=1, が split の前に入る
+        assert fc.startswith("[0:v]yadif=mode=1,split=")
+
+    def test_cpu_progressive_no_yadif(self):
+        args = build_ffmpeg_args(
+            input_path="/tmp/in.mp4", output_dir="/out",
+            variants=DEFAULT_VARIANTS, segment_seconds=4, gop=48,
+            backend="cpu", preset="ultrafast", threads=0, nvenc_preset="p4",
+            interlaced=False,
+        )
+        fc = args[args.index("-filter_complex") + 1]
+        assert "yadif" not in fc
+
+
+class TestVariantSubsetByInputSize:
+    """入力より大きい variant はスキップ (拡大防止 + NVENC 最小対策)。"""
+
+    def test_skips_variants_larger_than_input(self, tmp_path, monkeypatch):
+        import hls_video.hls_converter as mod
+        monkeypatch.setattr(mod, "resolve_hwaccel", lambda *_a, **_kw: "cpu")
+
+        called: dict = {}
+
+        def fake_run(args, on_progress=None, label=None):
+            called["args"] = args
+
+        monkeypatch.setattr(mod, "run_ffmpeg", fake_run)
+
+        # 入力 720x1280 (縦動画、短辺720) → 720p までは OK、それ以上の variant は
+        # ない (DEFAULT_VARIANTS max=720)。代わりに 480x854 (短辺480) で試す。
+        mod.convert_mp4_to_hls(
+            input_path="/tmp/in.mp4", output_dir=str(tmp_path / "hls"),
+            input_width=480, input_height=854,
+            input_codec="h264", duration_seconds=10.0,
+        )
+        fc = called["args"][called["args"].index("-filter_complex") + 1]
+        # 入力短辺 480 以下のみ残る = 480p / 360p / 240p の 3 本
+        assert "split=3" in fc
+
+    def test_keeps_smallest_variant_when_all_too_large(self, tmp_path, monkeypatch):
+        import hls_video.hls_converter as mod
+        monkeypatch.setattr(mod, "resolve_hwaccel", lambda *_a, **_kw: "cpu")
+
+        def fake_run(args, on_progress=None, label=None):
+            pass
+
+        monkeypatch.setattr(mod, "run_ffmpeg", fake_run)
+
+        # 入力 100x100 → 全 variant が大きい。最小 (240p) 1 本だけ残る。
+        res = mod.convert_mp4_to_hls(
+            input_path="/tmp/in.mp4", output_dir=str(tmp_path / "hls"),
+            input_width=100, input_height=100,
+            input_codec="h264", duration_seconds=10.0,
+        )
+        assert res["variants"] == ["240p"]
 
 
 class TestVariantSubset:

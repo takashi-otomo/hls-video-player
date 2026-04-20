@@ -173,14 +173,19 @@ def probe_video_stream(
 ) -> dict:
     """1 本目の video stream の基本情報を dict で返す。
 
-    キー: width (int), height (int), codec_name (str)。取得失敗時は 0/"" を埋めて返す。
-    orientation-aware scaling と CUVID decoder 選択の両方で使う。
+    取得するキー:
+    - width (int) / height (int): 解像度 → orientation 判定 / variant 選別
+    - codec_name (str): "h264" / "hevc" / ... → CUVID decoder 選択
+    - pix_fmt (str): "yuv420p" / "yuv420p10le" 等 → 10bit 判定
+    - field_order (str): "progressive" / "tt" / "bb" / ... → interlaced 判定
+
+    取得失敗時は 0 / "" を埋めて返す（呼び出し側でフォールバック前提）。
     """
     data = run_ffprobe_json(
         [
             "-v", "error",
             "-select_streams", "v:0",
-            "-show_entries", "stream=width,height,codec_name",
+            "-show_entries", "stream=width,height,codec_name,pix_fmt,field_order",
             "-of", "json",
             input_path,
         ],
@@ -189,14 +194,23 @@ def probe_video_stream(
     )
     streams = data.get("streams", [])
     if not streams:
-        return {"width": 0, "height": 0, "codec_name": ""}
+        return {
+            "width": 0, "height": 0, "codec_name": "",
+            "pix_fmt": "", "field_order": "",
+        }
     s = streams[0]
     try:
         w = int(s.get("width", 0) or 0)
         h = int(s.get("height", 0) or 0)
     except (TypeError, ValueError):
         w, h = 0, 0
-    return {"width": w, "height": h, "codec_name": str(s.get("codec_name") or "")}
+    return {
+        "width": w,
+        "height": h,
+        "codec_name": str(s.get("codec_name") or ""),
+        "pix_fmt": str(s.get("pix_fmt") or ""),
+        "field_order": str(s.get("field_order") or ""),
+    }
 
 
 def probe_video_dimensions(
