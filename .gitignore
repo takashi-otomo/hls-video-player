@@ -24,3 +24,9 @@ media/sprites/*
 !media/hls/.gitkeep
 !media/sprites/.gitkeep
 !media/source/README.md
+
+# 新アーキテクチャ: ライブラリフォルダ / 変換出力
+library/
+converted/
+favorites.json
+.library_settings.json

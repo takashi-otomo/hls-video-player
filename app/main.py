@@ -1,8 +1,10 @@
 """エントリポイント: `python -m app.main` で 7860 番ポートでアプリを起動する。
 
-FastAPI に Gradio を `gr.mount_gradio_app` でマウントし、
-/hls, /sprites, /static の静的ルートは FastAPI 側に先に登録する。
-Uvicorn が 7860 ポートで待受。
+新アーキテクチャ:
+- ライブラリパスは GUI から指定可能（`hls_video.library_settings` で永続化）
+- `/library/*` は static_mount 側で動的にライブラリパスを解決して配信
+- Gradio は閲覧専用 UI (`gradio_library_ui`)
+- 変換は CLI (`python -m hls_video.library_cli`) で行う
 """
 
 from __future__ import annotations
@@ -14,25 +16,22 @@ import gradio as gr
 import uvicorn
 from fastapi import FastAPI
 
-from app.gradio_ui import build_ui
-from app.static_mount import mount_static
+from app.gradio_library_ui import build_ui
 from app.player_embed import router as player_router
-from hls_video.config import media_root
+from app.static_mount import mount_static
 from hls_video.logging_setup import setup_logging
 
 
 def build_app() -> FastAPI:
-    setup_logging()  # stdout への INFO ログを有効化（Colab 可視）
-    media = media_root()
+    setup_logging()
     static_dir = str(Path(__file__).parent.parent / "static")
 
     fastapi_app = FastAPI(title="hls-video-player")
-    mount_static(fastapi_app, media_root=str(media), static_dir=static_dir)
+    mount_static(fastapi_app, static_dir=static_dir)
     fastapi_app.include_router(player_router)
 
-    demo = build_ui(media_dir=media)
+    demo = build_ui()
     demo.queue()
-    # Gradio を "/" 以下にマウント（先に登録した /hls, /sprites, /static, /player が優先）
     gr.mount_gradio_app(fastapi_app, demo, path="/")
     return fastapi_app
 

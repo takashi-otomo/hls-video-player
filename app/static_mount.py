@@ -1,42 +1,73 @@
-"""Gradio が内部で持つ FastAPI app に、HLS / sprites / 静的アセットを
-正しい MIME で配信するマウントを追加する。"""
+"""ライブラリ配下と同梱静的アセットの配信。
+
+- `/library/...` は **動的解決**: 各リクエスト時に `library_settings` から
+  ライブラリルートを取得し、`{lib_root}/{converted_dir}/...` から配信する。
+  GUI でパスを変更すると即座に切り替わる（再起動不要）。
+- `/static/...` はリポジトリ同梱（パスは固定）。
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-
-# 既定の StaticFiles は MIME を拡張子から推測するが、.m3u8 / .ts / .vtt は
-# OS 依存で正しく引けないことがあるため、サブクラスで明示する。
-class HlsStaticFiles(StaticFiles):
-    _OVERRIDES = {
-        ".m3u8": "application/vnd.apple.mpegurl",
-        ".ts": "video/mp2t",
-        ".vtt": "text/vtt",
-    }
-
-    async def get_response(self, path, scope):
-        response = await super().get_response(path, scope)
-        ext = Path(path).suffix.lower()
-        if ext in self._OVERRIDES:
-            response.headers["Content-Type"] = self._OVERRIDES[ext]
-            if ext == ".ts":
-                response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
-            elif ext == ".m3u8":
-                response.headers["Cache-Control"] = "no-cache"
-            response.headers["Access-Control-Allow-Origin"] = "*"
-        return response
+from hls_video.config import converted_dir_name
+from hls_video.library_settings import get_library_root
 
 
-def mount_static(app: FastAPI, *, media_root: str, static_dir: str) -> None:
-    media = Path(media_root)
-    (media / "hls").mkdir(parents=True, exist_ok=True)
-    (media / "sprites").mkdir(parents=True, exist_ok=True)
-    (media / "source").mkdir(parents=True, exist_ok=True)
+_MIME_OVERRIDES = {
+    ".m3u8": "application/vnd.apple.mpegurl",
+    ".ts": "video/mp2t",
+    ".vtt": "text/vtt",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".json": "application/json",
+}
 
-    app.mount("/hls", HlsStaticFiles(directory=str(media / "hls")), name="hls")
-    app.mount("/sprites", HlsStaticFiles(directory=str(media / "sprites")), name="sprites")
+
+def _cache_headers(ext: str) -> dict[str, str]:
+    h = {"Access-Control-Allow-Origin": "*"}
+    if ext == ".ts":
+        h["Cache-Control"] = "public, max-age=31536000, immutable"
+    elif ext in (".jpg", ".jpeg", ".png"):
+        h["Cache-Control"] = "public, max-age=86400"
+    elif ext == ".m3u8":
+        h["Cache-Control"] = "no-cache"
+    return h
+
+
+def _serve_library_file(rel_path: str) -> Response:
+    """`/library/<rel>` をライブラリ設定に従って動的配信する。"""
+    if ".." in rel_path.split("/"):
+        raise HTTPException(status_code=400, detail="invalid path")
+    lib = get_library_root()
+    base = (lib / converted_dir_name()).absolute()
+    target = (base / rel_path).absolute()
+    # base 外への逸脱防止（symlink は許容するため resolve しない）
+    try:
+        target.relative_to(base)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="forbidden")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="not_found")
+
+    ext = target.suffix.lower()
+    media_type = _MIME_OVERRIDES.get(ext)
+    headers = _cache_headers(ext)
+    return FileResponse(target, media_type=media_type, headers=headers)
+
+
+def mount_static(app: FastAPI, *, static_dir: str) -> None:
+    """`/static/*` を同梱 static/ に固定マウントする。
+
+    `/library/*` は player_embed.router 側で動的ルートとして登録するため、
+    ここではマウントしない。
+    """
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+
+__all__ = ["mount_static", "_serve_library_file"]

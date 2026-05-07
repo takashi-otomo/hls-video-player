@@ -1,5 +1,9 @@
 // Video.js + VHS ストリーミングプレイヤーを任意のコンテナ要素に
-// マウントする再利用可能ファクトリ。インライン展開と単独ページの両方で使用。
+// マウントする再利用可能ファクトリ。
+//
+// API レスポンス形式:
+//   { id, title, duration, masterUrl, posterUrl, thumbs: [{percent, url}, ...] }
+// thumbs は seek-bar ホバー時の小さなプレビュー（ツールチップ）にのみ使用。
 (function () {
   async function init(container, videoId) {
     const res = await fetch(`/api/videos/${encodeURIComponent(videoId)}`);
@@ -7,10 +11,10 @@
     const video = await res.json();
 
     const el = document.createElement('video-js');
-    // aspectRatio option 指定時は fluid クラスが不要（むしろ干渉するので付けない）
     el.className = 'video-js vjs-default-skin vjs-big-play-centered';
     el.setAttribute('controls', '');
     el.setAttribute('preload', 'auto');
+    if (video.posterUrl) el.setAttribute('poster', video.posterUrl);
     const source = document.createElement('source');
     source.src = video.masterUrl;
     source.type = 'application/x-mpegURL';
@@ -21,14 +25,15 @@
 
     const player = videojs(el, {
       playbackRates: [0.5, 1, 1.25, 1.5, 2],
-      // サムネイルと統一した 16:9 枠で固定。動画の実アスペクト比が異なっても letterbox で表示
       aspectRatio: '16:9',
       html5: {
         vhs: { overrideNative: true, enableLowInitialPlaylist: true },
       },
     });
 
-    if (video.sprite) attachSeekbarPreview(player, video.sprite);
+    if (video.thumbs && video.thumbs.length) {
+      attachSeekbarPreview(player, video);
+    }
     attachQualitySelector(player);
     player.options({ disableSeekWhileScrubbingOnMobile: true });
     player.on('error', () => console.error('playback error', player.error()));
@@ -42,20 +47,17 @@
     };
   }
 
-  function attachSeekbarPreview(player, sprite) {
-    // 後方互換: 旧形式 (url 単体) と新形式 (sheets 配列) を共に受け付ける
-    const sheets = sprite.sheets && sprite.sheets.length ? sprite.sheets : [sprite.url];
-    const { tileWidth, tileHeight, columns, interval } = sprite;
-    const rows = sprite.rows || 10;
-    const tilesPerSheet = rows * columns;
-    let currentSheet = -1;
-
+  // シークバーホバー時に「最も近い % のサムネ」を吹き出し表示。
+  // duration と thumbs[].percent を使い、カーソル位置の time から
+  // 一番近いサムネを選ぶシンプル実装。
+  function attachSeekbarPreview(player, video) {
+    const thumbs = video.thumbs;          // [{percent, url}]
     const tooltip = document.createElement('div');
     tooltip.className = 'vjs-seek-preview';
     tooltip.style.cssText = `
       position: absolute; pointer-events: none; bottom: 34px;
-      width: ${tileWidth}px; height: ${tileHeight}px;
-      background-repeat: no-repeat;
+      width: 160px; height: 90px;
+      background: #000 center/cover no-repeat;
       border: 2px solid rgba(255, 255, 255, 0.85); border-radius: 4px;
       box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
       transform: translateX(-50%); display: none; z-index: 2;
@@ -70,8 +72,9 @@
     `;
     tooltip.appendChild(timeLabel);
 
-    // 全シート事前ロード（巨大動画でも先頭シート分だけ消費されるので合計サイズは小）
-    sheets.forEach((url) => { const img = new Image(); img.src = url; });
+    thumbs.forEach((t) => { const img = new Image(); img.src = t.url; });
+
+    let currentUrl = '';
 
     player.ready(() => {
       const progressControl = player.controlBar.progressControl.el();
@@ -86,8 +89,18 @@
       progressControl.addEventListener('touchend', () => { tooltip.style.display = 'none'; });
     });
 
+    function pickNearestThumb(percent) {
+      let best = thumbs[0];
+      let bestDiff = Infinity;
+      for (const t of thumbs) {
+        const d = Math.abs(t.percent - percent);
+        if (d < bestDiff) { bestDiff = d; best = t; }
+      }
+      return best;
+    }
+
     function onMove(evt) {
-      const duration = player.duration();
+      const duration = player.duration() || video.duration || 0;
       if (!duration || !isFinite(duration)) return;
 
       const progressControl = player.controlBar.progressControl.el();
@@ -95,28 +108,20 @@
       if (rect.width === 0) return;
       const ratio = clamp((evt.clientX - rect.left) / rect.width, 0, 1);
       const time = ratio * duration;
-
-      const globalIndex = Math.min(Math.floor(time / interval), Math.floor(duration / interval));
-      const sheetIdx = Math.min(Math.floor(globalIndex / tilesPerSheet), sheets.length - 1);
-      const localIndex = globalIndex - sheetIdx * tilesPerSheet;
-      const x = (localIndex % columns) * tileWidth;
-      const y = Math.floor(localIndex / columns) * tileHeight;
-
-      if (sheetIdx !== currentSheet) {
-        tooltip.style.backgroundImage = `url("${sheets[sheetIdx]}")`;
-        currentSheet = sheetIdx;
+      const pct = ratio * 100;
+      const t = pickNearestThumb(pct);
+      if (t.url !== currentUrl) {
+        tooltip.style.backgroundImage = `url("${t.url}")`;
+        currentUrl = t.url;
       }
-
       tooltip.style.display = 'block';
       tooltip.style.left = `${ratio * rect.width}px`;
-      tooltip.style.backgroundPosition = `-${x}px -${y}px`;
       timeLabel.textContent = formatTime(time);
     }
   }
 
   // ユーザーが Auto / 240p / 360p / 480p / 720p など明示的に画質を選べる
   // 独自の小さなドロップダウンをプレイヤー右上に配置。
-  // VHS の representations().enabled() を直接切り替える（Auto 時は全有効）。
   function attachQualitySelector(player) {
     const wrap = document.createElement('div');
     wrap.className = 'vjs-quality-wrap';
@@ -145,7 +150,6 @@
       const reps = getReps();
       if (!reps || reps.length === 0) return false;
 
-      // Sort representations by height (high → low) for display
       const sorted = [...reps].sort((a, b) => (b.height || 0) - (a.height || 0));
       const items = [{ label: 'Auto', idx: -1 }]
         .concat(sorted.map((r) => ({
@@ -182,13 +186,12 @@
 
     toggle.addEventListener('click', (e) => {
       e.stopPropagation();
-      if (!build()) return; // 再生リスト未ロード時は何もしない
+      if (!build()) return;
       menu.hidden ? openMenu() : closeMenu();
     });
 
     player.one('loadedmetadata', () => { build(); });
 
-    // 外側クリックでメニューを閉じる
     const outsideClose = (e) => { if (!wrap.contains(e.target)) closeMenu(); };
     document.addEventListener('click', outsideClose, { passive: true });
     player.one('dispose', () => document.removeEventListener('click', outsideClose));

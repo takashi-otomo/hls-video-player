@@ -15,6 +15,21 @@ def media_root() -> Path:
     return Path(os.environ.get("MEDIA_ROOT", "./media")).resolve()
 
 
+def library_root() -> Path:
+    """LIBRARY_ROOT を絶対パスで返す。
+
+    新アーキテクチャ（folder-scan モデル）でユーザーが原本動画を置くルート。
+    変換出力はこの直下に `converted/{stem}/{hls,thumbs,meta.json}` として配置される。
+    既定はカレントの ./library。
+    """
+    return Path(os.environ.get("LIBRARY_ROOT", "./library")).resolve()
+
+
+def converted_dir_name() -> str:
+    """変換出力ルートのディレクトリ名（library_root 直下）。"""
+    return os.environ.get("CONVERTED_DIR", "converted")
+
+
 def ffmpeg_path() -> str:
     return os.environ.get("FFMPEG_PATH", "ffmpeg")
 
