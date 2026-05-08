@@ -504,9 +504,10 @@ class MainApp:
         self._thumb_cache: dict[str, "ImageTk.PhotoImage"] = {}
 
         # スキャン中だけ更新する読み取り専用キャッシュ (毎エントリの stat 回数削減)
-        self._converted_dirs: set[str] = set()       # converted/<stem>/ が存在する stem
-        self._converting_dirs: set[str] = set()      # converted/<stem>/.converting がある stem
-        self._index_data: dict | None = None         # converted_index の load() 結果
+        self._converted_dirs: set[str] = set()    # converted/<stem>/ が存在する stem
+        self._completed_set: set[str] = set()     # hls-index.json に登録済みの stem (確定 done)
+        self._suspicious_dirs: set[str] = set()   # dir はあるが index 未登録 (中断の可能性)
+        self._converting_dirs: set[str] = set()   # 旧互換 (現在は未使用)
 
         debug("Tk() 開始")
         self.root = tk.Tk()
@@ -996,48 +997,116 @@ class MainApp:
         debug("_refresh_converted_state: 開始")
         t0 = time.perf_counter()
         from hls_video.config import converted_dir_name
+
+        # 1) converted/ を listdir のみで取得 (Drive FUSE で stat 不要)
         converted_root = Path(self.folder) / converted_dir_name()
+        SKIP_NAMES = {"hls-index.json", ".hls-index.json", ".index.json"}
+        present: set[str] = set()
+        try:
+            for name in os.listdir(converted_root):
+                if name.startswith("."):
+                    continue
+                if name in SKIP_NAMES:
+                    continue
+                present.add(name)
+        except OSError as exc:
+            debug(f"_refresh_converted_state: listdir エラー: {exc}")
 
-        new_dirs: set[str] = set()
-        new_marks: set[str] = set()
-        if converted_root.is_dir():
-            try:
-                with os.scandir(converted_root) as it:
-                    for entry in it:
-                        if not entry.is_dir(follow_symlinks=False):
-                            continue
-                        if entry.name.startswith("."):
-                            continue
-                        new_dirs.add(entry.name)
-                        if (Path(entry.path) / CONVERTING_MARKER).exists():
-                            new_marks.add(entry.name)
-            except OSError as exc:
-                debug(f"_refresh_converted_state: scandir エラー: {exc}")
-
-        self._converted_dirs = new_dirs
-        self._converting_dirs = new_marks
+        self._converted_dirs = present
+        # 暫定: index ロード前は全部「未確定」(背景ロード完了後に更新)
+        self._completed_set = set()
+        self._suspicious_dirs = set(present)
+        self._converting_dirs = set()
 
         debug(
-            f"_refresh_converted_state: 完了 ({(time.perf_counter()-t0)*1000:.1f}ms) "
-            f"converted={len(new_dirs)}, converting={len(new_marks)}"
+            f"_refresh_converted_state: listdir 完了 "
+            f"({(time.perf_counter()-t0)*1000:.1f}ms) "
+            f"present={len(present)}"
+        )
+
+        # 2) index ロードは背景スレッドで (Drive FUSE では初回ダウンロード待ちで
+        #    数十秒〜数分かかるため、GUI スレッドをブロックしない)
+        self._start_background_index_load(present)
+
+    def _start_background_index_load(self, present: set[str]):
+        """インデックスを別スレッドで読み、完了したら _on_index_loaded で反映する。"""
+        gen = self._scan_generation
+
+        def _worker():
+            from hls_video import converted_index as _ci
+            t0 = time.perf_counter()
+            try:
+                idx = _ci.load(self.folder)
+                completed = set((idx.get("completed") or {}).keys())
+            except Exception as exc:  # noqa: BLE001
+                debug(f"index load worker エラー: {exc}")
+                completed = set()
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            self.root.after(
+                0,
+                lambda c=completed, p=present, g=gen, e=elapsed_ms:
+                    self._on_index_loaded(c, p, g, e),
+            )
+
+        threading.Thread(target=_worker, name="hls-index-loader", daemon=True).start()
+
+    def _on_index_loaded(
+        self, completed: set[str], present: set[str],
+        gen: int, elapsed_ms: float,
+    ):
+        """背景ロード完了 → 各行の HLS 状態を再評価して必要な行だけ更新。"""
+        if gen != self._scan_generation:
+            return  # 古いスキャンの結果
+        self._completed_set = completed
+        self._suspicious_dirs = present - completed
+        debug(
+            f"index loaded ({elapsed_ms:.0f}ms): "
+            f"indexed={len(completed)}, suspicious={len(self._suspicious_dirs)}"
+        )
+
+        # ツリーで HLS 列を持つ全行を再描画 (ステータスが変わる可能性のある行のみ)
+        try:
+            updated = 0
+            for uuid in list(self.tree.get_children()):
+                if uuid not in self._converted_dirs:
+                    continue
+                # 値配列の HLS 列だけ書き換え (再描画範囲を最小化)
+                vals = list(self.tree.item(uuid, "values"))
+                if len(vals) < 6:
+                    continue
+                state, label = self._hls_state(uuid)
+                if vals[2] != label:
+                    vals[2] = label
+                    self.tree.item(uuid, values=tuple(vals))
+                    self.hls_status_map[uuid] = state
+                    # 完了に変わったらサムネを背景でロード
+                    if state == "done" and uuid not in self._thumb_cache:
+                        self._enqueue_thumb_load(uuid)
+                    updated += 1
+        except tk.TclError:
+            return
+        self._log(
+            f"📑 インデックス読み込み完了: {len(completed)} 件 "
+            f"({elapsed_ms/1000:.1f}s){' / 行更新: ' + str(updated) if updated else ''}"
         )
 
     def _hls_state(self, uuid: str) -> tuple[str, str]:
         """(state_key, label) を返す。 O(1) — 個別 stat なし。
 
-        判定は **scandir で得たディレクトリ存在 + .converting マーカー有無のみ**:
-          - converted/<uuid>/ が無ければ "📼 HLS未"
-          - .converting マーカーがあれば "⏳ HLS変換中"
-          - それ以外は "🎞 HLS済" (楽観判定: 中身は再生時に検証される)
+        判定は **インデックス + scandir 結果** のみで決まる:
+          - converted/<uuid>/ が無い              → "📼 HLS未"
+          - インデックスに登録あり                → "🎞 HLS済"  (確定)
+          - dir はあるが index 未登録            → "⏳ HLS未確定" (中断 or 未 rebuild)
 
-        ※ 厳格に判定したい場合は `hls-convert --rebuild-index` または再生時の
-          /api/videos が個別ファイルの妥当性を確認する。
+        Drive FUSE 環境では 1 動画あたりのファイル stat を完全に避けるため、
+        マーカーファイル `.converting` の存在チェックは行わない。厳密な判定が
+        必要な場合は `hls-convert --rebuild-index` で index を最新化してから開く。
         """
         if uuid not in self._converted_dirs:
             return "none", "📼 HLS未"
-        if uuid in self._converting_dirs:
-            return "converting", "⏳ HLS変換中"
-        return "done", "🎞 HLS済"
+        if uuid in self._completed_set:
+            return "done", "🎞 HLS済"
+        return "converting", "⏳ HLS未確定"
 
     def _thumb_for(self, uuid: str) -> object | None:
         """既にキャッシュされたサムネ画像を返す (バックグラウンド生成は別途)。"""
