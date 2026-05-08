@@ -6,8 +6,14 @@
   python -m hls_video.library_cli -w 4                  # 4 並列
   python -m hls_video.library_cli --filter abc          # ファイル名フィルタ（部分一致）
   python -m hls_video.library_cli --force               # 既存出力を再生成
+  python -m hls_video.library_cli --rebuild-index       # 既変換インデックスを FS から再構築
 
 ts_merge_colab.py の体裁を踏襲。
+
+高速判定:
+  converted/.index.json に「変換済み stem ↔ (元動画 size, mtime)」を記録しており、
+  毎回 7 ファイル × N 動画の存在チェックを行う旧実装より大幅に高速 (Drive FUSE 等で顕著)。
+  インデックスが消えたり破損していれば `--rebuild-index` で再生成可能。
 """
 
 from __future__ import annotations
@@ -19,6 +25,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from hls_video import converted_index
 from hls_video.library_converter import (
     VIDEO_EXTS, convert_one, is_already_converted, is_converting, scan_library,
 )
@@ -44,15 +51,11 @@ def _format_size(n: int) -> str:
 
 
 def _process_one(src: Path, lib_root: Path, force: bool) -> dict:
+    """convert_one() のラッパ。既変換チェックは呼び出し側で済ませている前提。"""
     base = src.stem
     try:
-        if not force and is_already_converted(base, lib_root):
-            _log(f"⏭ スキップ (変換済): {src.name}", base)
-            return {"base": base, "status": "skipped", "elapsed": 0.0}
-
         # 中断された変換を検出した場合は明示的にログを出す
-        was_interrupted = is_converting(base, lib_root)
-        if was_interrupted:
+        if is_converting(base, lib_root):
             _log(f"♻️  前回の変換が中断されていたので再変換: {src.name}", base)
         else:
             _log(f"🎬 変換開始: {src.name} ({_format_size(src.stat().st_size)})", base)
@@ -96,6 +99,10 @@ def main(argv: list[str] | None = None) -> int:
         "--dry-run", action="store_true",
         help="走査結果のみ表示し、変換は実行しない",
     )
+    parser.add_argument(
+        "--rebuild-index", action="store_true",
+        help="converted/.index.json を FS 走査して再構築 (壊れた / 失った場合の復旧用)",
+    )
     args = parser.parse_args(argv)
 
     setup_logging()
@@ -105,6 +112,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"エラー: ディレクトリが存在しません: {lib_root}", file=sys.stderr)
         return 1
 
+    if args.rebuild_index:
+        t = time.time()
+        new_data = converted_index.rebuild_from_fs(lib_root)
+        _log(
+            f"インデックス再構築完了: {len(new_data['completed'])} 件 "
+            f"({time.time() - t:.1f}s) → {converted_index.index_path(lib_root)}"
+        )
+        # 続行: 通常の変換フローも走らせる
+
     _log(f"=== HLS Library Convert ===")
     _log(f"ライブラリ: {lib_root}")
     _log(f"出力先   : {lib_root}/converted/<stem>/")
@@ -112,6 +128,8 @@ def main(argv: list[str] | None = None) -> int:
     _log(f"対象拡張子: {sorted(VIDEO_EXTS)}")
     print("", flush=True)
 
+    # 走査 + 既変換判定: インデックスを 1 回読んで使い回す (Drive FUSE の I/O 削減)
+    t_scan = time.time()
     sources = scan_library(lib_root)
     if args.filter:
         sources = [s for s in sources if args.filter in s.name]
@@ -121,20 +139,25 @@ def main(argv: list[str] | None = None) -> int:
         _log("対象ファイルが見つかりません")
         return 0
 
+    index_data = converted_index.load(lib_root)
+
     targets: list[Path] = []
     skipped = 0
     interrupted_count = 0
     for s in sources:
-        if not args.force and is_already_converted(s.stem, lib_root):
+        if not args.force and is_already_converted(
+            s.stem, lib_root, source_path=s, index_data=index_data,
+        ):
             skipped += 1
             continue
         if is_converting(s.stem, lib_root):
             interrupted_count += 1
         targets.append(s)
+    scan_elapsed = time.time() - t_scan
 
     summary = (
         f"検出: {len(sources)} 件 / 変換対象: {len(targets)} 件 "
-        f"(スキップ: {skipped})"
+        f"(スキップ: {skipped}, 走査 {scan_elapsed:.2f}s)"
     )
     if interrupted_count:
         summary += f"  ⚠ 中断分の再変換: {interrupted_count} 件"
@@ -142,7 +165,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.dry_run:
         for s in sources:
-            if is_already_converted(s.stem, lib_root):
+            if is_already_converted(
+                s.stem, lib_root, source_path=s, index_data=index_data,
+            ):
                 mark = "✓"
             elif is_converting(s.stem, lib_root):
                 mark = "♻️ "  # 中断分

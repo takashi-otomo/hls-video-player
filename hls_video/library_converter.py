@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Optional
 
 from hls_video.config import library_root, converted_dir_name
+from hls_video import converted_index
 from hls_video.ffmpeg_runner import probe_duration_seconds, probe_video_stream
 from hls_video.hls_converter import convert_mp4_to_hls
 from hls_video.thumbnail_generator import (
@@ -64,32 +65,56 @@ def is_converting(stem: str, lib_root: Optional[Path] = None) -> bool:
     return (output_dir_for(stem, lib_root) / CONVERTING_MARKER).exists()
 
 
-def is_already_converted(stem: str, lib_root: Optional[Path] = None) -> bool:
+def is_already_converted(
+    stem: str,
+    lib_root: Optional[Path] = None,
+    *,
+    source_path: Optional[Path] = None,
+    index_data: Optional[dict] = None,
+    use_index: bool = True,
+) -> bool:
     """変換が完全に終了しているか判定。
 
-    以下すべてが揃っている場合のみ True:
-      - .converting マーカーが存在しない (= 中断されていない)
+    高速パス (use_index=True かつ source_path 指定):
+      - converted/.index.json に stem があり、かつ元動画の (size, mtime) が
+        記録と一致 → 即 True (FS stat なし)
+      - これにより N 動画のスキャンが O(N) hash lookup に短縮される
+
+    厳格 FS パス (use_index=False、または index miss 時):
+      - .converting マーカー無し
       - hls/master.m3u8
       - thumbs/poster.png
       - thumbs/thumb_{05,30,50,60,80}.jpg (5 枚すべて)
       - meta.json (parse 可能)
     """
-    out = output_dir_for(stem, lib_root)
+    # 高速パス: インデックスを参照 (3 状態)
+    if use_index and source_path is not None:
+        status = converted_index.index_status(
+            stem, Path(source_path), lib_root=lib_root, data=index_data,
+        )
+        if status == converted_index.STATUS_MATCH:
+            # マーカーが残っていれば中断扱いに格下げ (安全側)
+            if (output_dir_for(stem, lib_root) / CONVERTING_MARKER).exists():
+                return False
+            return True
+        if status == converted_index.STATUS_STALE:
+            # 元動画が変わっている / 消えている → 古い出力は再変換対象
+            return False
+        # STATUS_UNKNOWN → 厳格 FS パスにフォールスルー
+        # (旧バージョンでの変換済みも index 化されていない可能性があるため)
 
-    # 中断マーカーがあれば未完了扱い (kill された変換の検出)
+    # 厳格 FS パス
+    out = output_dir_for(stem, lib_root)
     if (out / CONVERTING_MARKER).exists():
         return False
-
     if not (out / "hls" / "master.m3u8").exists():
         return False
     if not (out / "thumbs" / "poster.png").exists():
         return False
-    # 5 枚のサムネが揃っているか
     thumbs_dir = out / "thumbs"
     for p in THUMB_PERCENTS:
         if not (thumbs_dir / thumb_filename(p)).exists():
             return False
-    # meta.json が parse 可能か (空ファイルや破損 JSON を除外)
     meta_path = out / "meta.json"
     if not meta_path.exists():
         return False
@@ -181,7 +206,7 @@ def convert_one(
     thumbs_dir = out_dir / "thumbs"
     marker = out_dir / CONVERTING_MARKER
 
-    if not force and is_already_converted(stem, lib_root):
+    if not force and is_already_converted(stem, lib_root, source_path=src):
         return ConvertResult(
             stem=stem,
             output_dir=out_dir,
@@ -260,6 +285,12 @@ def convert_one(
         marker.unlink()
     except OSError:
         pass
+
+    # インデックス更新 (次回 CLI 起動時に O(1) で完了判定)
+    try:
+        converted_index.mark_complete(stem, src, lib_root=lib_root)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("failed to update converted index for %s: %s", stem, exc)
 
     elapsed = time.monotonic() - t0
     logger.info("convert done : %s (%.1fs)", stem, elapsed)
