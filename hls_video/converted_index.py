@@ -1,13 +1,15 @@
 """変換済み動画のインデックス。
 
-`{lib_root}/{converted_dir}/.hls-index.json` に「変換済みステム」を記録し、
+`{lib_root}/{converted_dir}/hls-index.json` に「変換済みステム」を記録し、
 CLI 起動時の「既変換判定」を O(1) で済ませる。Drive FUSE のように stat が
 遅い環境で、毎回 7 ファイル × N 動画の存在チェックが致命的に遅くなるのを回避。
 
 ファイル名について:
-  ts_merge 用の `<lib_root>/index.md` とは別物。`.hls-index.json` は
+  ts_merge 用の `<lib_root>/index.md` とは別物。`hls-index.json` は
   `converted/` の中にあり、HLS 変換済みであることだけを記録する。
-  古い名前 `.index.json` を見つけたら自動的に読み込んで互換動作する。
+  ユーザーが直接見て確認できるよう dot prefix は付けていない。
+  古い名前 `.hls-index.json` / `.index.json` を見つけたら自動的に読み込み、
+  次回 save 時に新名前へ移行する。
 
 エントリ形式:
     {
@@ -43,10 +45,13 @@ from hls_video.library_settings import get_library_root
 
 logger = logging.getLogger(__name__)
 
-# 現行の名前 (ts_merge の index.md と区別するため "hls-" prefix)
-INDEX_FILENAME = ".hls-index.json"
-# 旧名前 (フォールバックで読み込みのみ)
-LEGACY_INDEX_FILENAME = ".index.json"
+# 現行の名前 (ts_merge の index.md と区別するため "hls-" prefix、隠しファイルではない)
+INDEX_FILENAME = "hls-index.json"
+# 過去の名前 (フォールバックで読み込みのみ、見つかったら自動的に新名前へ移行)
+LEGACY_INDEX_FILENAMES: tuple[str, ...] = (
+    ".hls-index.json",  # 1 世代前 (dot prefix だった)
+    ".index.json",      # 2 世代前 (より曖昧だった)
+)
 INDEX_VERSION = 1
 
 # mtime 比較の許容誤差。Drive FUSE では mtime の精度が秒単位なので 1s。
@@ -61,10 +66,13 @@ def index_path(lib_root: Optional[Path] = None) -> Path:
     return base / converted_dir_name() / INDEX_FILENAME
 
 
-def legacy_index_path(lib_root: Optional[Path] = None) -> Path:
-    """旧名前のインデックスファイルパス (互換用に読み込みでのみ参照)。"""
+def legacy_index_paths(lib_root: Optional[Path] = None) -> list[Path]:
+    """過去のインデックスファイルパス候補 (古い順)。"""
     base = Path(lib_root) if lib_root else get_library_root()
-    return base / converted_dir_name() / LEGACY_INDEX_FILENAME
+    return [
+        base / converted_dir_name() / name
+        for name in LEGACY_INDEX_FILENAMES
+    ]
 
 
 def _empty() -> dict:
@@ -95,20 +103,21 @@ def load(lib_root: Optional[Path] = None) -> dict:
     """インデックスを読み込む。
 
     優先順:
-      1. `<converted>/.hls-index.json` (現行)
-      2. `<converted>/.index.json`     (旧名、見つかったらそれを使うが書き込みはしない)
+      1. `<converted>/hls-index.json` (現行)
+      2. `<converted>/.hls-index.json`, `.index.json` (旧名、書き込み時に新名前へ移行)
       3. 空 dict
     """
     data = _read_json_or_empty(index_path(lib_root))
     if data is not None:
         return data
-    legacy = _read_json_or_empty(legacy_index_path(lib_root))
-    if legacy is not None:
-        logger.info(
-            "loaded legacy converted index from %s (will be migrated on next save)",
-            legacy_index_path(lib_root),
-        )
-        return legacy
+    for legacy in legacy_index_paths(lib_root):
+        legacy_data = _read_json_or_empty(legacy)
+        if legacy_data is not None:
+            logger.info(
+                "loaded legacy converted index from %s (will be migrated on next save)",
+                legacy,
+            )
+            return legacy_data
     return _empty()
 
 
@@ -137,13 +146,13 @@ def save(data: dict, lib_root: Optional[Path] = None) -> None:
                 pass
             p.write_text(body)
         # 旧ファイルが残っていたら削除 (重複混乱を避ける)
-        legacy = legacy_index_path(lib_root)
-        if legacy.exists():
-            try:
-                legacy.unlink()
-                logger.info("removed legacy index %s", legacy)
-            except OSError as exc:
-                logger.warning("could not remove legacy index %s: %s", legacy, exc)
+        for legacy in legacy_index_paths(lib_root):
+            if legacy.exists():
+                try:
+                    legacy.unlink()
+                    logger.info("removed legacy index %s", legacy)
+                except OSError as exc:
+                    logger.warning("could not remove legacy index %s: %s", legacy, exc)
 
 
 # インデックス参照結果の 3 状態
