@@ -1421,16 +1421,15 @@ class MainApp:
         self._update_row_display(item)
 
     def _on_tree_double_click(self, event):
-        """行をダブルクリック → HLS 変換済なら再生。"""
+        """行をダブルクリック → converted/<uuid>/ があれば再生試行。"""
         item = self.tree.identify_row(event.y)
         if not item:
             return
-        # 子ノードならその親 (UUID) を再生
         parent = self.tree.parent(item)
         base = parent if parent else item
         if base not in self.check_vars:
             return
-        if self.hls_status_map.get(base) == "done":
+        if base in self._converted_dirs:
             self._play_uuid(base)
 
     def _on_right_click(self, event):
@@ -1840,32 +1839,48 @@ class MainApp:
         else:
             self._start_player_server()
 
-    def _start_player_server(self):
-        """同プロセスで FastAPI を起動する (daemon thread)。"""
+    def _start_player_server(self) -> bool:
+        """同プロセスで FastAPI を起動する (daemon thread)。
+
+        port が listening になるまで最大 10 秒待つ。失敗時は messagebox で通知。
+        Returns: True なら起動成功、False なら失敗。
+        """
         if self._player_running:
-            return
+            return True
         try:
             import uvicorn
             from app.main import build_app
             from hls_video.library_settings import set_library_root
         except Exception as exc:  # noqa: BLE001
+            import traceback
+            tb = traceback.format_exc()
             self._log(f"❌ プレイヤー起動失敗 (依存不足?): {exc}")
             messagebox.showerror(
                 "プレイヤー起動失敗",
                 f"FastAPI / Gradio が読み込めませんでした:\n{exc}\n\n"
-                "`pip install -e '.[app]'` で依存をインストールしてください。",
+                "pipx で再インストール:\n"
+                "  pipx install --force \"<repo>[gui,app]\"\n\n"
+                f"詳細:\n{tb[-500:]}",
             )
-            return
+            return False
 
         # GUI のフォルダをライブラリルートとして登録
-        set_library_root(self.folder)
+        try:
+            set_library_root(self.folder)
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"⚠ set_library_root 失敗: {exc}")
 
         try:
             fapi = build_app()
         except Exception as exc:  # noqa: BLE001
+            import traceback
+            tb = traceback.format_exc()
             self._log(f"❌ build_app 失敗: {exc}")
-            messagebox.showerror("プレイヤー起動失敗", str(exc))
-            return
+            messagebox.showerror(
+                "プレイヤー起動失敗 (build_app)",
+                f"{exc}\n\n詳細:\n{tb[-500:]}",
+            )
+            return False
 
         config = uvicorn.Config(
             fapi, host="127.0.0.1", port=self.player_port,
@@ -1873,24 +1888,81 @@ class MainApp:
         )
         self._player_server = uvicorn.Server(config)
 
+        # クラッシュ情報を main thread に届けるための共有変数
+        crash_info: dict = {}
+
         def _run():
             try:
                 self._player_server.run()
-            except Exception as exc:  # noqa: BLE001
+            except BaseException as exc:  # noqa: BLE001
+                import traceback
+                crash_info["error"] = str(exc)
+                crash_info["traceback"] = traceback.format_exc()
                 debug(f"player server crashed: {exc}")
             finally:
                 self._player_running = False
                 self.root.after(0, self._refresh_player_btn)
+                # 起動後にクラッシュした場合は messagebox で通知
+                if crash_info and crash_info.get("notify"):
+                    self.root.after(
+                        0,
+                        lambda c=dict(crash_info): self._show_player_crash(c),
+                    )
 
         self._player_thread = threading.Thread(
             target=_run, name="hls-player-uvicorn", daemon=True)
         self._player_thread.start()
         self._player_running = True
+
+        # uvicorn が port 7860 を listen するまで polling で待つ (最大 10 秒)
+        import socket
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if not self._player_thread.is_alive():
+                # スレッドが死んだ → クラッシュ
+                err = crash_info.get("error", "(unknown)")
+                tb = crash_info.get("traceback", "")
+                self._player_running = False
+                self._log(f"❌ プレイヤーサーバが起動直後にクラッシュ: {err}")
+                messagebox.showerror(
+                    "プレイヤー起動失敗 (uvicorn)",
+                    f"{err}\n\n詳細:\n{tb[-800:]}",
+                )
+                return False
+            try:
+                with socket.create_connection(("127.0.0.1", self.player_port), timeout=0.3):
+                    self._log(
+                        f"🎬 プレイヤー起動: http://127.0.0.1:{self.player_port}/  "
+                        f"(ライブラリ: {self.folder})"
+                    )
+                    self._refresh_player_btn()
+                    # 起動成功後のクラッシュは messagebox で通知させる
+                    crash_info["notify"] = True
+                    return True
+            except OSError:
+                time.sleep(0.2)
+
+        # タイムアウト
         self._log(
-            f"🎬 プレイヤー起動: http://127.0.0.1:{self.player_port}/  "
-            f"(ライブラリ: {self.folder})"
+            f"❌ プレイヤーサーバ起動タイムアウト (port {self.player_port} が "
+            "10 秒経っても listening になりません)"
         )
-        self._refresh_player_btn()
+        messagebox.showerror(
+            "プレイヤー起動タイムアウト",
+            f"port {self.player_port} が 10 秒経っても応答しません。\n"
+            "他のプロセスがポートを使用しているか、ビルドが詰まっている可能性があります。\n"
+            f"`lsof -i :{self.player_port}` で確認してください。",
+        )
+        return False
+
+    def _show_player_crash(self, info: dict):
+        """プレイヤースレッドが起動後にクラッシュした時の通知。"""
+        err = info.get("error", "(unknown)")
+        tb = info.get("traceback", "")
+        messagebox.showerror(
+            "プレイヤーサーバが停止しました",
+            f"{err}\n\n詳細:\n{tb[-600:]}",
+        )
 
     def _stop_player_server(self):
         if not self._player_running or self._player_server is None:
@@ -1906,23 +1978,31 @@ class MainApp:
             self.player_btn.config(text="🎬 プレイヤー起動")
 
     def _ensure_player_running(self) -> bool:
+        """プレイヤーサーバが立っているか確認。立っていなければ起動を促し、port が
+        listening になってから True を返す (port poll は _start_player_server 内で実装)。"""
         if self._player_running:
             return True
-        if messagebox.askyesno(
+        if not messagebox.askyesno(
             "プレイヤー起動",
             "プレイヤーサーバが起動していません。今すぐ起動しますか？",
         ):
-            self._start_player_server()
-            time.sleep(1.5)
-            return self._player_running
-        return False
+            return False
+        return self._start_player_server()
 
     def _play_uuid(self, uuid: str):
-        if self.hls_status_map.get(uuid) != "done":
+        """ブラウザで /player/<uuid> を開く。
+
+        判定ルール:
+          - converted/<uuid>/ が存在しない → 再生不可
+          - 存在する場合は (index 未確定でも) 再生を試みる
+            (実際の妥当性は player ページが /api/videos/<uuid> で検証)
+        """
+        if uuid not in self._converted_dirs:
             messagebox.showwarning(
                 "再生不可",
                 f"{uuid[:12]}... はまだ HLS 変換されていません。\n"
-                f"`python -m hls_video.library_cli {self.folder}` で変換してください。",
+                f"  hls-convert {self.folder}\n"
+                "を実行してから再度お試しください。",
             )
             return
         if not self._ensure_player_running():
