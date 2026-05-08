@@ -503,6 +503,11 @@ class MainApp:
         # サムネキャッシュ (PhotoImage は GC されないよう参照を保持する必要がある)
         self._thumb_cache: dict[str, "ImageTk.PhotoImage"] = {}
 
+        # スキャン中だけ更新する読み取り専用キャッシュ (毎エントリの stat 回数削減)
+        self._converted_dirs: set[str] = set()       # converted/<stem>/ が存在する stem
+        self._converting_dirs: set[str] = set()      # converted/<stem>/.converting がある stem
+        self._index_data: dict | None = None         # converted_index の load() 結果
+
         debug("Tk() 開始")
         self.root = tk.Tk()
         debug("Tk() 完了")
@@ -714,6 +719,8 @@ class MainApp:
         self._scan_generation = getattr(self, "_scan_generation", 0) + 1
         old_checks = {b: v.get() for b, v in self.check_vars.items()}
         self._old_checks = old_checks
+        # converted/ の状態を 1 回だけ scandir で取得 (UUID 数に依存しない)
+        self._refresh_converted_state()
 
         self.check_vars.clear()
         self.url_map.clear()
@@ -980,45 +987,115 @@ class MainApp:
 
     # ─── HLS 変換状態とサムネ ───
 
-    def _hls_state(self, uuid: str) -> tuple[str, str]:
-        """(state_key, label) を返す。
-        state_key: "done" / "converting" / "none"
-        label   : 表示用文字列
+    def _refresh_converted_state(self):
+        """converted/ を 1 回 scandir してマーカー / 完了情報を一括取得する。
+
+        Drive FUSE 等で個別 stat が遅い環境では、UUID ごとに 7-9 回 stat する
+        旧実装より大幅に高速。スキャン開始時 (1 回) だけ呼べば十分。
         """
-        lib_root = Path(self.folder)
-        out_dir = output_dir_for(uuid, lib_root)
-        if not out_dir.exists():
+        debug("_refresh_converted_state: 開始")
+        t0 = time.perf_counter()
+        from hls_video.config import converted_dir_name
+        converted_root = Path(self.folder) / converted_dir_name()
+
+        new_dirs: set[str] = set()
+        new_marks: set[str] = set()
+        if converted_root.is_dir():
+            try:
+                with os.scandir(converted_root) as it:
+                    for entry in it:
+                        if not entry.is_dir(follow_symlinks=False):
+                            continue
+                        if entry.name.startswith("."):
+                            continue
+                        new_dirs.add(entry.name)
+                        if (Path(entry.path) / CONVERTING_MARKER).exists():
+                            new_marks.add(entry.name)
+            except OSError as exc:
+                debug(f"_refresh_converted_state: scandir エラー: {exc}")
+
+        self._converted_dirs = new_dirs
+        self._converting_dirs = new_marks
+
+        debug(
+            f"_refresh_converted_state: 完了 ({(time.perf_counter()-t0)*1000:.1f}ms) "
+            f"converted={len(new_dirs)}, converting={len(new_marks)}"
+        )
+
+    def _hls_state(self, uuid: str) -> tuple[str, str]:
+        """(state_key, label) を返す。 O(1) — 個別 stat なし。
+
+        判定は **scandir で得たディレクトリ存在 + .converting マーカー有無のみ**:
+          - converted/<uuid>/ が無ければ "📼 HLS未"
+          - .converting マーカーがあれば "⏳ HLS変換中"
+          - それ以外は "🎞 HLS済" (楽観判定: 中身は再生時に検証される)
+
+        ※ 厳格に判定したい場合は `hls-convert --rebuild-index` または再生時の
+          /api/videos が個別ファイルの妥当性を確認する。
+        """
+        if uuid not in self._converted_dirs:
             return "none", "📼 HLS未"
-        if (out_dir / CONVERTING_MARKER).exists():
+        if uuid in self._converting_dirs:
             return "converting", "⏳ HLS変換中"
-        # source_path は ts_merge では不明 (mp4 のパスがあれば渡す)
-        # is_already_converted は厳格 FS チェックで判定
-        if is_already_converted(uuid, lib_root, use_index=False):
-            return "done", "🎞 HLS済"
-        # converted/{uuid}/ はあるが完成していない (途中失敗 or rebuild 中)
-        return "converting", "⏳ HLS途中"
+        return "done", "🎞 HLS済"
 
     def _thumb_for(self, uuid: str) -> object | None:
-        """{folder}/converted/{uuid}/thumbs/poster.png をサムネ画像として返す。
-
-        Pillow 必須。読み込みは 1 回だけキャッシュ。サムネが無ければ None。
-        """
+        """既にキャッシュされたサムネ画像を返す (バックグラウンド生成は別途)。"""
         if not _PIL_AVAILABLE:
             return None
+        return self._thumb_cache.get(uuid)
+
+    def _enqueue_thumb_load(self, uuid: str):
+        """サムネを別スレッドで読み込み、完了時に該当行へ反映する。
+
+        UI スレッドでの PIL ロードは Drive FUSE 上で 100ms 級になりブロックする。
+        background thread でバイト読み + リサイズし、最後の `ImageTk.PhotoImage`
+        とツリー更新だけ main thread (after) で行う。
+        """
+        if not _PIL_AVAILABLE:
+            return
         if uuid in self._thumb_cache:
-            return self._thumb_cache[uuid]
-        poster = output_dir_for(uuid, Path(self.folder)) / "thumbs" / "poster.png"
-        if not poster.is_file():
-            return None
+            return
+        # 候補ファイル: poster.png 優先、無ければ thumb_50.jpg
+        out_dir = output_dir_for(uuid, Path(self.folder))
+        poster = out_dir / "thumbs" / "poster.png"
+        thumb50 = out_dir / "thumbs" / "thumb_50.jpg"
+
+        gen = self._scan_generation
+
+        def _worker():
+            # 重い IO + 縮小はここで (worker thread)
+            src = poster if poster.is_file() else (thumb50 if thumb50.is_file() else None)
+            if src is None:
+                return
+            try:
+                img = Image.open(src)
+                img.thumbnail((80, 45), Image.LANCZOS)
+                # ImageTk.PhotoImage は Tcl の操作が入るので main thread で
+                self.root.after(0, lambda i=img, u=uuid, g=gen: self._apply_thumb(u, i, g))
+            except Exception as exc:  # noqa: BLE001
+                debug(f"thumb worker failed {uuid}: {exc}")
+
+        threading.Thread(target=_worker, name=f"thumb-{uuid[:8]}", daemon=True).start()
+
+    def _apply_thumb(self, uuid: str, img, gen: int):
+        """worker thread から渡された PIL.Image を Tk 画像化して該当行へ反映 (main thread)。"""
+        if gen != self._scan_generation:
+            return  # 古いスキャンの結果
+        if uuid in self._thumb_cache:
+            return
         try:
-            img = Image.open(poster)
-            img.thumbnail((80, 45), Image.LANCZOS)
             photo = ImageTk.PhotoImage(img)
-            self._thumb_cache[uuid] = photo
-            return photo
         except Exception as exc:  # noqa: BLE001
-            debug(f"thumb load failed {uuid}: {exc}")
-            return None
+            debug(f"ImageTk failed {uuid}: {exc}")
+            return
+        self._thumb_cache[uuid] = photo
+        # ツリーが該当行を持っていれば画像を貼る
+        try:
+            if self.tree.exists(uuid):
+                self.tree.item(uuid, image=photo)
+        except tk.TclError:
+            pass
 
     def _update_row(self, uuid: str, info: dict, progress: int):
         """スキャン結果で1行を更新する (メインスレッド)。"""
@@ -1110,16 +1187,20 @@ class MainApp:
         # HLS 変換ステータス + サムネ画像
         hls_state, hls_label = self._hls_state(uuid)
         self.hls_status_map[uuid] = hls_state
-        thumb_img = self._thumb_for(uuid)
 
         item_kwargs = {
             "text": f"  {uuid}",
             "values": (check_mark, status, hls_label, parts_str, size_str, merged_info),
             "tags": (tag, check_tag),
         }
-        if thumb_img is not None:
-            item_kwargs["image"] = thumb_img
+        cached_thumb = self._thumb_for(uuid)
+        if cached_thumb is not None:
+            item_kwargs["image"] = cached_thumb
         self.tree.item(uuid, **item_kwargs)
+
+        # サムネ未キャッシュ + HLS 完了状態 → 別スレッドで非同期ロード
+        if cached_thumb is None and hls_state == "done":
+            self._enqueue_thumb_load(uuid)
 
         # 子ノード: MP4
         if has_mp4:
