@@ -1,8 +1,13 @@
 """変換済み動画のインデックス。
 
-`{lib_root}/{converted_dir}/.index.json` に「変換済みステム」を記録し、
+`{lib_root}/{converted_dir}/.hls-index.json` に「変換済みステム」を記録し、
 CLI 起動時の「既変換判定」を O(1) で済ませる。Drive FUSE のように stat が
 遅い環境で、毎回 7 ファイル × N 動画の存在チェックが致命的に遅くなるのを回避。
+
+ファイル名について:
+  ts_merge 用の `<lib_root>/index.md` とは別物。`.hls-index.json` は
+  `converted/` の中にあり、HLS 変換済みであることだけを記録する。
+  古い名前 `.index.json` を見つけたら自動的に読み込んで互換動作する。
 
 エントリ形式:
     {
@@ -38,7 +43,10 @@ from hls_video.library_settings import get_library_root
 
 logger = logging.getLogger(__name__)
 
-INDEX_FILENAME = ".index.json"
+# 現行の名前 (ts_merge の index.md と区別するため "hls-" prefix)
+INDEX_FILENAME = ".hls-index.json"
+# 旧名前 (フォールバックで読み込みのみ)
+LEGACY_INDEX_FILENAME = ".index.json"
 INDEX_VERSION = 1
 
 # mtime 比較の許容誤差。Drive FUSE では mtime の精度が秒単位なので 1s。
@@ -48,44 +56,94 @@ _LOCK = threading.RLock()
 
 
 def index_path(lib_root: Optional[Path] = None) -> Path:
+    """現行のインデックスファイルパス。"""
     base = Path(lib_root) if lib_root else get_library_root()
     return base / converted_dir_name() / INDEX_FILENAME
+
+
+def legacy_index_path(lib_root: Optional[Path] = None) -> Path:
+    """旧名前のインデックスファイルパス (互換用に読み込みでのみ参照)。"""
+    base = Path(lib_root) if lib_root else get_library_root()
+    return base / converted_dir_name() / LEGACY_INDEX_FILENAME
 
 
 def _empty() -> dict:
     return {"version": INDEX_VERSION, "completed": {}}
 
 
-def load(lib_root: Optional[Path] = None) -> dict:
-    """インデックスを読み込む。存在しない / 破損していれば空 dict を返す。"""
-    p = index_path(lib_root)
+def _read_json_or_empty(p: Path) -> Optional[dict]:
+    """1 ファイルを読んでバリデート。失敗 / 不在なら None。"""
     if not p.exists():
-        return _empty()
+        return None
     try:
         data = json.loads(p.read_text() or "{}")
     except Exception as exc:  # noqa: BLE001
-        logger.warning("converted index parse failed (%s); treating as empty", exc)
-        return _empty()
+        logger.warning("converted index parse failed at %s (%s); ignoring", p, exc)
+        return None
     if data.get("version") != INDEX_VERSION:
-        # 互換性ない → 一旦空扱い (CLI 側で rebuild)
         logger.info(
-            "converted index version mismatch (%s != %s); treating as empty",
-            data.get("version"), INDEX_VERSION,
+            "converted index version mismatch at %s (%s != %s); ignoring",
+            p, data.get("version"), INDEX_VERSION,
         )
-        return _empty()
+        return None
     if not isinstance(data.get("completed"), dict):
-        return _empty()
+        return None
     return data
 
 
+def load(lib_root: Optional[Path] = None) -> dict:
+    """インデックスを読み込む。
+
+    優先順:
+      1. `<converted>/.hls-index.json` (現行)
+      2. `<converted>/.index.json`     (旧名、見つかったらそれを使うが書き込みはしない)
+      3. 空 dict
+    """
+    data = _read_json_or_empty(index_path(lib_root))
+    if data is not None:
+        return data
+    legacy = _read_json_or_empty(legacy_index_path(lib_root))
+    if legacy is not None:
+        logger.info(
+            "loaded legacy converted index from %s (will be migrated on next save)",
+            legacy_index_path(lib_root),
+        )
+        return legacy
+    return _empty()
+
+
 def save(data: dict, lib_root: Optional[Path] = None) -> None:
-    """インデックスをアトミックに保存する (.tmp → rename)。"""
+    """インデックスをアトミックに保存する (.tmp → rename)。
+
+    Drive FUSE 等で `Path.replace()` の atomic rename が失敗した場合は
+    fallback として直接書き込みを試みる。失敗時は例外を投げる (CLI で可視化)。
+    """
     p = index_path(lib_root)
     with _LOCK:
         p.parent.mkdir(parents=True, exist_ok=True)
         tmp = p.with_suffix(p.suffix + ".tmp")
-        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-        tmp.replace(p)
+        body = json.dumps(data, indent=2, ensure_ascii=False)
+        try:
+            tmp.write_text(body)
+            tmp.replace(p)
+        except OSError as exc:
+            # Drive FUSE での replace 失敗フォールバック: 直接書き込み
+            logger.warning(
+                "atomic save failed (%s); falling back to direct write", exc,
+            )
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            p.write_text(body)
+        # 旧ファイルが残っていたら削除 (重複混乱を避ける)
+        legacy = legacy_index_path(lib_root)
+        if legacy.exists():
+            try:
+                legacy.unlink()
+                logger.info("removed legacy index %s", legacy)
+            except OSError as exc:
+                logger.warning("could not remove legacy index %s: %s", legacy, exc)
 
 
 # インデックス参照結果の 3 状態
@@ -175,8 +233,9 @@ def rebuild_from_fs(lib_root: Optional[Path] = None) -> dict:
     converted/{stem}/ を 1 つずつ見て、library_converter.is_already_converted の
     厳格 FS 判定 (マーカー / 5 枚サムネ / meta.json parse) をパスしたものだけ index 化。
     元動画が見つかれば (size, mtime) も記録する。
+
+    converted/ が無い場合でも空の index ファイルを生成する (次回以降の高速判定の起点)。
     """
-    # 循環 import 回避のため遅延 import
     from hls_video.library_converter import (
         is_already_converted, scan_library, output_dir_for,
     )
@@ -188,33 +247,38 @@ def rebuild_from_fs(lib_root: Optional[Path] = None) -> dict:
     completed = new_data["completed"]
 
     converted_root = base / converted_dir_name()
-    if not converted_root.is_dir():
-        save(new_data, base)
-        return new_data
-
-    count = 0
-    for entry in sorted(converted_root.iterdir()):
-        if not entry.is_dir():
-            continue
-        stem = entry.name
-        # 厳格 FS チェックで完了している stem だけ採用
-        if not is_already_converted(stem, base, use_index=False):
-            continue
-        record: dict = {
-            "completed_at": datetime.now(tz=timezone.utc).isoformat(),
-        }
-        src = sources_by_stem.get(stem)
-        if src is not None:
-            try:
-                st = src.stat()
-                record["size"] = int(st.st_size)
-                record["mtime"] = float(st.st_mtime)
-                record["source"] = src.name
-            except OSError:
-                pass
-        completed[stem] = record
-        count += 1
+    if converted_root.is_dir():
+        count = 0
+        for entry in sorted(converted_root.iterdir()):
+            if not entry.is_dir():
+                continue
+            stem = entry.name
+            if not is_already_converted(stem, base, use_index=False):
+                continue
+            record: dict = {
+                "completed_at": datetime.now(tz=timezone.utc).isoformat(),
+            }
+            src = sources_by_stem.get(stem)
+            if src is not None:
+                try:
+                    st = src.stat()
+                    record["size"] = int(st.st_size)
+                    record["mtime"] = float(st.st_mtime)
+                    record["source"] = src.name
+                except OSError:
+                    pass
+            completed[stem] = record
+            count += 1
+        logger.info("scanned %d converted dirs → %d completed", count,
+                    len(completed))
 
     save(new_data, base)
-    logger.info("converted index rebuilt: %d entries → %s", count, index_path(base))
+    out = index_path(base)
+    if out.exists():
+        logger.info(
+            "converted index rebuilt: %d entries → %s (%d bytes)",
+            len(completed), out, out.stat().st_size,
+        )
+    else:
+        logger.error("converted index file NOT created at %s", out)
     return new_data

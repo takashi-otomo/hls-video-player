@@ -114,11 +114,21 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.rebuild_index:
         t = time.time()
-        new_data = converted_index.rebuild_from_fs(lib_root)
-        _log(
-            f"インデックス再構築完了: {len(new_data['completed'])} 件 "
-            f"({time.time() - t:.1f}s) → {converted_index.index_path(lib_root)}"
-        )
+        try:
+            new_data = converted_index.rebuild_from_fs(lib_root)
+        except Exception as exc:  # noqa: BLE001
+            _log(f"❌ インデックス再構築失敗: {exc}")
+            return 1
+        idx_path = converted_index.index_path(lib_root)
+        if idx_path.exists():
+            _log(
+                f"インデックス再構築完了: {len(new_data['completed'])} 件 "
+                f"({time.time() - t:.1f}s)"
+            )
+            _log(f"  → {idx_path}  ({idx_path.stat().st_size} bytes)")
+        else:
+            _log(f"⚠ インデックス書き込みに失敗 (パス: {idx_path})")
+            return 1
         # 続行: 通常の変換フローも走らせる
 
     _log(f"=== HLS Library Convert ===")
