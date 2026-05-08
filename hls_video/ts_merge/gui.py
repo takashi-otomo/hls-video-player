@@ -44,6 +44,16 @@ from hls_video import converted_index
 from hls_video.library_converter import (
     CONVERTING_MARKER, output_dir_for, is_already_converted, is_converting,
 )
+# お気に入り (Web GUI と同じ {library_root}/favorites.json を共有)
+from hls_video import favorites as _favorites
+from hls_video.thumbnail_generator import THUMB_PERCENTS, thumb_filename
+
+# グリッドカード寸法 (Web /play と同じ 16:9)
+_GRID_CARD_W = 220
+_GRID_CARD_H = int(_GRID_CARD_W * 9 / 16)   # 123.75 → 123
+_GRID_THUMB_W = 200
+_GRID_THUMB_H = int(_GRID_THUMB_W * 9 / 16)  # 112.5 → 112
+_SLIDESHOW_INTERVAL_MS = 700
 
 # --debug フラグ
 DEBUG = False
@@ -501,13 +511,22 @@ class MainApp:
         self._start_player_on_boot = start_player
 
         # サムネキャッシュ (PhotoImage は GC されないよう参照を保持する必要がある)
-        self._thumb_cache: dict[str, "ImageTk.PhotoImage"] = {}
+        self._thumb_cache: dict[str, "ImageTk.PhotoImage"] = {}        # list view 80x45
+        self._poster_cache: dict[str, "ImageTk.PhotoImage"] = {}       # grid 200x112 poster
+        self._slideshow_cache: dict[str, list] = {}                    # grid hover 用 6 枚
 
         # スキャン中だけ更新する読み取り専用キャッシュ (毎エントリの stat 回数削減)
         self._converted_dirs: set[str] = set()    # converted/<stem>/ が存在する stem
         self._completed_set: set[str] = set()     # hls-index.json に登録済みの stem (確定 done)
         self._suspicious_dirs: set[str] = set()   # dir はあるが index 未登録 (中断の可能性)
         self._converting_dirs: set[str] = set()   # 旧互換 (現在は未使用)
+
+        # グリッドビュー用
+        self._grid_built = False
+        self._grid_cards: dict[str, dict] = {}    # uuid -> {frame, thumb_label, fav_btn, ...}
+        self._grid_fav_only_var: tk.BooleanVar | None = None
+        self._grid_filter_var: tk.StringVar | None = None
+        self._favorites_set: set[str] = set()
 
         debug("Tk() 開始")
         self.root = tk.Tk()
@@ -587,9 +606,16 @@ class MainApp:
 
         ttk.Separator(self.root).pack(fill=tk.X)
 
-        # メインコンテンツ（上下分割）
-        paned = ttk.PanedWindow(self.root, orient=tk.VERTICAL)
-        paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        # Notebook でビューを切替: 一覧 (TS結合管理) / グリッド (再生)
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 0))
+
+        # === Tab 1: 一覧 (既存の TS 管理 UI) ===
+        list_tab = ttk.Frame(self.notebook)
+        self.notebook.add(list_tab, text="📋 一覧 (TS結合管理)")
+
+        paned = ttk.PanedWindow(list_tab, orient=tk.VERTICAL)
+        paned.pack(fill=tk.BOTH, expand=True)
 
         # 上部: ツリービュー
         tree_frame = ttk.LabelFrame(paned, text="ファイル一覧", padding=5)
@@ -696,6 +722,12 @@ class MainApp:
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
+        # === Tab 2: グリッド (再生) — 中身は遅延構築 ===
+        self.grid_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.grid_tab, text="🎞 ライブラリ (グリッド再生)")
+        # タブ初表示時に build (1280 件分の widget を最初から作らないため)
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
         # ステータスバー
         self.bottom_status = ttk.Label(
             self.root, text=f"フォルダ: {self.folder}",
@@ -711,6 +743,399 @@ class MainApp:
             self.log_text.delete("1.0", f"{line_count - self.MAX_LOG_LINES}.0")
         self.log_text.see(tk.END)
         self.log_text.config(state=tk.DISABLED)
+
+    # ─── グリッドビュー (動画再生用、Web /play と同等の UX) ───
+
+    def _on_tab_changed(self, event):
+        """タブ変更時: グリッドタブが初めて開かれたら build。"""
+        try:
+            sel = self.notebook.select()
+            if not sel:
+                return
+            idx = self.notebook.index(sel)
+        except tk.TclError:
+            return
+        # idx 1 = グリッドタブ
+        if idx == 1 and not self._grid_built:
+            self._build_grid_view()
+            self._grid_built = True
+            self._populate_grid()
+        elif idx == 1 and self._grid_built:
+            # ★ お気に入りはタブ切替の度に最新化 (web GUI で変えた可能性)
+            self._refresh_favorites_set()
+
+    def _build_grid_view(self):
+        """グリッドタブの中身を構築 (Canvas + 内部 Frame + フィルタバー)。"""
+        if not _PIL_AVAILABLE:
+            ttk.Label(
+                self.grid_tab,
+                text=("グリッド表示には Pillow が必要です。\n"
+                      "  pipx install --force \"<repo>[gui,app]\""),
+                padding=20, foreground="orange",
+            ).pack()
+            return
+
+        # フィルタバー (★お気に入り + 検索 + 更新)
+        filter_bar = ttk.Frame(self.grid_tab, padding=(8, 6))
+        filter_bar.pack(fill=tk.X)
+
+        self._grid_fav_only_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            filter_bar, text="★ お気に入りのみ",
+            variable=self._grid_fav_only_var, command=self._populate_grid,
+        ).pack(side=tk.LEFT)
+
+        ttk.Separator(filter_bar, orient=tk.VERTICAL).pack(
+            side=tk.LEFT, fill=tk.Y, padx=8)
+
+        ttk.Label(filter_bar, text="絞り込み:").pack(side=tk.LEFT, padx=(0, 4))
+        self._grid_filter_var = tk.StringVar(value="")
+        filter_entry = ttk.Entry(filter_bar, textvariable=self._grid_filter_var, width=24)
+        filter_entry.pack(side=tk.LEFT, padx=(0, 8))
+        filter_entry.bind("<Return>", lambda e: self._populate_grid())
+        ttk.Button(
+            filter_bar, text="↻ 更新", command=self._populate_grid,
+        ).pack(side=tk.RIGHT)
+        self._grid_count_label = ttk.Label(
+            filter_bar, text="", foreground="gray")
+        self._grid_count_label.pack(side=tk.RIGHT, padx=(0, 8))
+
+        # Canvas + scrollbar (縦スクロールのみ)
+        canvas_frame = ttk.Frame(self.grid_tab)
+        canvas_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        canvas = tk.Canvas(canvas_frame, bg="#0a0c10", highlightthickness=0)
+        scrollbar = ttk.Scrollbar(canvas_frame, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self._grid_canvas = canvas
+
+        # 内側の Frame (カードを並べる場所)
+        self._grid_inner = tk.Frame(canvas, bg="#0a0c10")
+        self._grid_inner_id = canvas.create_window((0, 0), window=self._grid_inner, anchor="nw")
+
+        # canvas の幅変化に inner を追従
+        def _on_canvas_configure(e):
+            canvas.itemconfig(self._grid_inner_id, width=e.width)
+            # 列数の再計算が必要であればここで _populate_grid() を呼んでもよい
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_inner_configure(e):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        self._grid_inner.bind("<Configure>", _on_inner_configure)
+
+        # マウスホイールでスクロール (macOS / Linux 両対応)
+        def _on_mousewheel(e):
+            canvas.yview_scroll(int(-e.delta / 3), "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel, add="+")
+
+    def _refresh_favorites_set(self):
+        """favorites.json を読み直してメモリにキャッシュ。"""
+        try:
+            self._favorites_set = _favorites.load_favorites(self.folder)
+        except Exception as exc:  # noqa: BLE001
+            debug(f"favorites load failed: {exc}")
+            self._favorites_set = set()
+
+    def _populate_grid(self):
+        """現在の状態 (HLS済 + フィルタ) でグリッドカードを再描画。"""
+        if not self._grid_built:
+            return
+        # 既存カードを破棄
+        for w in list(self._grid_inner.children.values()):
+            w.destroy()
+        self._grid_cards.clear()
+
+        # 最新の favorites を取得
+        self._refresh_favorites_set()
+
+        # 表示対象: converted/<uuid>/ がある entries
+        # 一覧タブと同じ entries 構造を流用
+        candidates = []
+        filter_q = (self._grid_filter_var.get() or "").strip().lower() if self._grid_filter_var else ""
+        for entry in self.entries:
+            uuid = entry["uuid"]
+            if uuid not in self._converted_dirs:
+                continue
+            if self._grid_fav_only_var and self._grid_fav_only_var.get():
+                if uuid not in self._favorites_set:
+                    continue
+            if filter_q and filter_q not in uuid.lower():
+                continue
+            candidates.append(uuid)
+
+        # converted/ にあるが entries に無い UUID も拾う (TS なし変換だけのケース)
+        seen = {e["uuid"] for e in self.entries}
+        for uuid in sorted(self._converted_dirs - seen):
+            if self._grid_fav_only_var and self._grid_fav_only_var.get():
+                if uuid not in self._favorites_set:
+                    continue
+            if filter_q and filter_q not in uuid.lower():
+                continue
+            candidates.append(uuid)
+
+        if not candidates:
+            empty = tk.Label(
+                self._grid_inner,
+                text="(条件に一致する HLS 済み動画がありません)",
+                bg="#0a0c10", fg="#8b93a1", padx=20, pady=20, font=("", 12),
+            )
+            empty.grid(row=0, column=0, padx=10, pady=10)
+            self._grid_count_label.config(text="")
+            return
+
+        # 列数: canvas 幅 / カード幅 (パディング込み)
+        try:
+            canvas_w = self._grid_canvas.winfo_width()
+        except Exception:  # noqa: BLE001
+            canvas_w = 1100
+        cols = max(1, canvas_w // (_GRID_CARD_W + 16))
+
+        for i, uuid in enumerate(candidates):
+            row, col = divmod(i, cols)
+            self._render_grid_card(self._grid_inner, uuid, row, col)
+
+        self._grid_count_label.config(text=f"{len(candidates)} 件")
+
+    def _render_grid_card(self, parent, uuid: str, row: int, col: int):
+        """1 つのカードを描画して self._grid_cards[uuid] に登録。"""
+        card = tk.Frame(parent, bg="#1a1d24", padx=2, pady=2,
+                        highlightbackground="#272c36", highlightthickness=1)
+        card.grid(row=row, column=col, padx=6, pady=6, sticky="n")
+
+        # サムネ Label (16:9 placeholder)
+        thumb = tk.Label(
+            card, bg="#0a0c10",
+            width=_GRID_THUMB_W, height=_GRID_THUMB_H,
+            cursor="hand2",
+        )
+        # Tk Label の width/height は文字単位なのでピクセルで固定するため
+        # 空の PhotoImage で寸法を確保 (compound 不要)
+        try:
+            placeholder = tk.PhotoImage(width=_GRID_THUMB_W, height=_GRID_THUMB_H)
+            thumb.configure(image=placeholder, width=_GRID_THUMB_W, height=_GRID_THUMB_H)
+            thumb._placeholder_ref = placeholder  # GC 防止
+        except tk.TclError:
+            pass
+        thumb.pack()
+
+        # タイトル (uuid を縮めて表示)
+        title_text = uuid[:36] + ("…" if len(uuid) > 36 else "")
+        title_label = tk.Label(
+            card, text=title_text, bg="#1a1d24", fg="#e6e8eb",
+            font=("Menlo", 9), wraplength=_GRID_THUMB_W,
+            justify="left", anchor="w",
+        )
+        title_label.pack(fill=tk.X, padx=4, pady=(2, 0))
+
+        # ボタン行
+        btn_row = tk.Frame(card, bg="#1a1d24")
+        btn_row.pack(fill=tk.X, pady=(2, 2))
+
+        is_fav = uuid in self._favorites_set
+        fav_btn = tk.Button(
+            btn_row, text=("★" if is_fav else "☆"),
+            bg=("#2a2620" if is_fav else "#1a1d24"),
+            fg=("#ffc857" if is_fav else "#888"),
+            relief="flat", borderwidth=0, cursor="hand2",
+            font=("", 12),
+            command=lambda u=uuid: self._toggle_grid_fav(u),
+        )
+        fav_btn.pack(side=tk.LEFT, padx=(4, 2))
+
+        play_btn = tk.Button(
+            btn_row, text="▶ 再生", bg="#1a1d24", fg="#4aa8ff",
+            relief="flat", borderwidth=0, cursor="hand2",
+            font=("", 10),
+            command=lambda u=uuid: self._play_uuid(u),
+        )
+        play_btn.pack(side=tk.RIGHT, padx=(2, 4))
+
+        # サムネクリックで再生
+        def _on_thumb_click(e, u=uuid):
+            self._play_uuid(u)
+        thumb.bind("<Button-1>", _on_thumb_click)
+
+        # ホバーでスライドショー
+        slideshow_state = {"idx": 0, "after_id": None, "loaded": False}
+        self._bind_card_hover(thumb, uuid, slideshow_state)
+
+        self._grid_cards[uuid] = {
+            "frame": card, "thumb": thumb,
+            "fav_btn": fav_btn, "play_btn": play_btn,
+            "slideshow": slideshow_state,
+        }
+
+        # poster.png を背景でロード
+        self._enqueue_poster_load(uuid)
+
+    def _bind_card_hover(self, thumb_label, uuid: str, state: dict):
+        """サムネにマウスホバーすると poster→05→30→50→60→80→poster をループ。"""
+        def _start(_e=None):
+            frames = self._slideshow_cache.get(uuid)
+            if frames is None:
+                # 初ホバー: 6 枚を background で読む。完了後にもう一度 hover で開始可
+                self._enqueue_slideshow_load(uuid)
+                return
+            state["idx"] = 0
+            self._cancel_slideshow_step(state)
+            _step()
+
+        def _step():
+            frames = self._slideshow_cache.get(uuid)
+            if not frames:
+                return
+            try:
+                thumb_label.configure(image=frames[state["idx"]])
+            except tk.TclError:
+                return
+            state["idx"] = (state["idx"] + 1) % len(frames)
+            state["after_id"] = self.root.after(_SLIDESHOW_INTERVAL_MS, _step)
+
+        def _stop(_e=None):
+            self._cancel_slideshow_step(state)
+            state["idx"] = 0
+            frames = self._slideshow_cache.get(uuid)
+            if frames:
+                try:
+                    thumb_label.configure(image=frames[0])  # poster
+                except tk.TclError:
+                    pass
+
+        thumb_label.bind("<Enter>", _start)
+        thumb_label.bind("<Leave>", _stop)
+
+    def _cancel_slideshow_step(self, state: dict):
+        if state.get("after_id") is not None:
+            try:
+                self.root.after_cancel(state["after_id"])
+            except Exception:  # noqa: BLE001
+                pass
+            state["after_id"] = None
+
+    def _enqueue_poster_load(self, uuid: str):
+        """poster.png を background thread でロードしてサムネ Label に貼る。"""
+        if uuid in self._poster_cache:
+            self._apply_poster(uuid, self._poster_cache[uuid])
+            return
+        out_dir = output_dir_for(uuid, Path(self.folder))
+        poster = out_dir / "thumbs" / "poster.png"
+        # poster が無ければ thumb_50 を fallback
+        src = poster if poster.is_file() else (out_dir / "thumbs" / thumb_filename(50))
+        if not src.is_file():
+            return
+
+        def _worker():
+            try:
+                img = Image.open(src)
+                img.thumbnail((_GRID_THUMB_W, _GRID_THUMB_H), Image.LANCZOS)
+                self.root.after(
+                    0, lambda i=img, u=uuid: self._on_poster_loaded(u, i),
+                )
+            except Exception as exc:  # noqa: BLE001
+                debug(f"poster load failed {uuid}: {exc}")
+
+        threading.Thread(
+            target=_worker, name=f"poster-{uuid[:8]}", daemon=True,
+        ).start()
+
+    def _on_poster_loaded(self, uuid: str, img):
+        try:
+            photo = ImageTk.PhotoImage(img)
+        except Exception as exc:  # noqa: BLE001
+            debug(f"PhotoImage failed {uuid}: {exc}")
+            return
+        self._poster_cache[uuid] = photo
+        self._apply_poster(uuid, photo)
+
+    def _apply_poster(self, uuid: str, photo):
+        card = self._grid_cards.get(uuid)
+        if not card:
+            return
+        try:
+            card["thumb"].configure(image=photo)
+        except tk.TclError:
+            pass
+
+    def _enqueue_slideshow_load(self, uuid: str):
+        """ホバー初回: poster + 5 枚を一括ロードして slideshow_cache に格納。"""
+        if uuid in self._slideshow_cache:
+            return
+        # 重複起動を避ける
+        if hasattr(self, "_slideshow_loading") and uuid in self._slideshow_loading:
+            return
+        if not hasattr(self, "_slideshow_loading"):
+            self._slideshow_loading = set()
+        self._slideshow_loading.add(uuid)
+
+        out_dir = output_dir_for(uuid, Path(self.folder))
+        poster = out_dir / "thumbs" / "poster.png"
+        thumb_paths = [out_dir / "thumbs" / thumb_filename(p) for p in THUMB_PERCENTS]
+
+        def _worker():
+            imgs = []
+            try:
+                # 順序: poster → 5%, 30%, 50%, 60%, 80%
+                for src in [poster, *thumb_paths]:
+                    if not src.is_file():
+                        continue
+                    img = Image.open(src)
+                    img.thumbnail((_GRID_THUMB_W, _GRID_THUMB_H), Image.LANCZOS)
+                    imgs.append(img)
+            except Exception as exc:  # noqa: BLE001
+                debug(f"slideshow load failed {uuid}: {exc}")
+            if imgs:
+                self.root.after(0, lambda: self._on_slideshow_loaded(uuid, imgs))
+            else:
+                self._slideshow_loading.discard(uuid)
+
+        threading.Thread(
+            target=_worker, name=f"slide-{uuid[:8]}", daemon=True,
+        ).start()
+
+    def _on_slideshow_loaded(self, uuid: str, imgs: list):
+        """6 枚 (or それ以下) の Image を PhotoImage 化してキャッシュ。"""
+        try:
+            photos = [ImageTk.PhotoImage(i) for i in imgs]
+        except Exception as exc:  # noqa: BLE001
+            debug(f"slideshow PhotoImage failed {uuid}: {exc}")
+            self._slideshow_loading.discard(uuid)
+            return
+        self._slideshow_cache[uuid] = photos
+        # 1 枚目 (poster) をデフォルト表示にも反映
+        if photos:
+            self._poster_cache[uuid] = photos[0]
+            self._apply_poster(uuid, photos[0])
+        self._slideshow_loading.discard(uuid)
+
+    def _toggle_grid_fav(self, uuid: str):
+        """お気に入りトグル。favorites.json を更新し UI を即時反映。"""
+        try:
+            new_state = _favorites.toggle_favorite(uuid, self.folder)
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"❌ お気に入り更新失敗: {exc}")
+            return
+        if new_state:
+            self._favorites_set.add(uuid)
+        else:
+            self._favorites_set.discard(uuid)
+        self._log(f"{'★' if new_state else '☆'} {uuid}")
+        # ボタン外観更新
+        card = self._grid_cards.get(uuid)
+        if card:
+            btn = card["fav_btn"]
+            try:
+                btn.configure(
+                    text=("★" if new_state else "☆"),
+                    bg=("#2a2620" if new_state else "#1a1d24"),
+                    fg=("#ffc857" if new_state else "#888"),
+                )
+            except tk.TclError:
+                pass
+        # フィルタが「お気に入りのみ」なら一覧再構築
+        if (self._grid_fav_only_var and self._grid_fav_only_var.get()
+                and not new_state):
+            self._populate_grid()
 
     # ─── スキャン ───
 
