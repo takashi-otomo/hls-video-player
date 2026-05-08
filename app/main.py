@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 import gradio as gr
 import uvicorn
@@ -24,10 +23,9 @@ from hls_video.logging_setup import setup_logging
 
 def build_app() -> FastAPI:
     setup_logging()
-    static_dir = str(Path(__file__).parent.parent / "static")
-
     fastapi_app = FastAPI(title="hls-video-player")
-    mount_static(fastapi_app, static_dir=static_dir)
+    # static_dir 省略時は app/static/ を自動解決 (pipx インストールでもパッケージ内なので確実)
+    mount_static(fastapi_app)
     fastapi_app.include_router(player_router)
 
     demo = build_ui()

@@ -61,13 +61,31 @@ def _serve_library_file(rel_path: str) -> Response:
     return FileResponse(target, media_type=media_type, headers=headers)
 
 
-def mount_static(app: FastAPI, *, static_dir: str) -> None:
-    """`/static/*` を同梱 static/ に固定マウントする。
+# app パッケージ内に同梱した static ディレクトリ (pipx インストールでも一緒にコピーされる)
+_PACKAGE_STATIC_DIR = Path(__file__).parent / "static"
+
+
+def default_static_dir() -> Path:
+    """同梱 static/ のパス (app パッケージ内)。pipx / pip いずれでも有効。"""
+    return _PACKAGE_STATIC_DIR
+
+
+def mount_static(app: FastAPI, *, static_dir: str | None = None) -> None:
+    """`/static/*` を同梱 static/ にマウントする。
+
+    static_dir 省略時は `app/static/` を自動使用 (pipx インストール時に
+    パッケージと一緒にコピーされるため pyproject.toml 配下で確実に存在)。
 
     `/library/*` は player_embed.router 側で動的ルートとして登録するため、
     ここではマウントしない。
     """
-    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+    path = Path(static_dir) if static_dir else _PACKAGE_STATIC_DIR
+    if not path.is_dir():
+        raise RuntimeError(
+            f"static directory not found: {path}\n"
+            "pipx で再インストールしてください: pipx install --force \"<repo>[gui,app]\""
+        )
+    app.mount("/static", StaticFiles(directory=str(path)), name="static")
 
 
-__all__ = ["mount_static", "_serve_library_file"]
+__all__ = ["mount_static", "default_static_dir", "_serve_library_file"]

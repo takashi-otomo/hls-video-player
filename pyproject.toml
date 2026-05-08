@@ -32,6 +32,11 @@ hls-convert = "hls_video.library_cli:main"
 where = ["."]
 include = ["hls_video*", "app*"]
 
+[tool.setuptools.package-data]
+# app/static/* を確実に同梱 (pipx 等の non-editable インストールでも .css / .js が
+# パッケージと一緒にコピーされる)
+"app" = ["static/*", "static/**/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
