@@ -53,6 +53,10 @@ _GRID_CARD_W = 220
 _GRID_CARD_H = int(_GRID_CARD_W * 9 / 16)   # 123.75 → 123
 _GRID_THUMB_W = 200
 _GRID_THUMB_H = int(_GRID_THUMB_W * 9 / 16)  # 112.5 → 112
+# カード全体の高さ: サムネ + タイトル (~20px) + ボタン行 (~26px) + padding
+_GRID_CARD_FULL_H = _GRID_THUMB_H + 60
+_GRID_CARD_GAP = 10                         # カード間の余白 (px)
+_GRID_VIEWPORT_BUFFER_ROWS = 2              # ビューポート上下に余分に描画する行数
 _SLIDESHOW_INTERVAL_MS = 700
 
 # --debug フラグ
@@ -523,10 +527,16 @@ class MainApp:
 
         # グリッドビュー用
         self._grid_built = False
-        self._grid_cards: dict[str, dict] = {}    # uuid -> {frame, thumb_label, fav_btn, ...}
+        self._grid_cards: dict[str, dict] = {}    # uuid -> {frame, thumb_label, fav_btn, ...} (実体化済のみ)
         self._grid_fav_only_var: tk.BooleanVar | None = None
         self._grid_filter_var: tk.StringVar | None = None
         self._favorites_set: set[str] = set()
+        # ビューポート遅延描画
+        self._grid_layout: list[tuple] = []        # [(uuid, x, y), ...] 全候補の位置 (描画されているとは限らない)
+        self._grid_cols: int = 0
+        self._grid_total_h: int = 0
+        self._grid_render_pending: bool = False
+        self._slideshow_loading: set[str] = set()
 
         debug("Tk() 開始")
         self.root = tk.Tk()
@@ -805,26 +815,36 @@ class MainApp:
         canvas_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
         canvas = tk.Canvas(canvas_frame, bg="#0a0c10", highlightthickness=0)
         scrollbar = ttk.Scrollbar(canvas_frame, orient=tk.VERTICAL, command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
+
+        # スクロール時にビューポート可視範囲のみ描画する仕組み
+        def _on_yscroll(*args):
+            scrollbar.set(*args)
+            # 多数の after が同時にキューイングされないようフラグでデバウンス
+            if not self._grid_render_pending:
+                self._grid_render_pending = True
+                self.root.after_idle(self._render_visible_cards)
+
+        canvas.configure(yscrollcommand=_on_yscroll)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self._grid_canvas = canvas
 
-        # 内側の Frame (カードを並べる場所)
+        # 内側の Frame (カードを「絶対座標で place」する土台)
+        # widget は viewport に入った時だけ create_window で配置する
         self._grid_inner = tk.Frame(canvas, bg="#0a0c10")
-        self._grid_inner_id = canvas.create_window((0, 0), window=self._grid_inner, anchor="nw")
+        self._grid_inner_id = canvas.create_window(
+            (0, 0), window=self._grid_inner, anchor="nw")
 
-        # canvas の幅変化に inner を追従
+        # canvas の幅変化 → 列数を再計算 → 全レイアウトを組み直し
         def _on_canvas_configure(e):
             canvas.itemconfig(self._grid_inner_id, width=e.width)
-            # 列数の再計算が必要であればここで _populate_grid() を呼んでもよい
+            # 列数が変わるので再計算 (描画は遅延)
+            if self._grid_built:
+                self._recompute_layout()
+                self._render_visible_cards()
         canvas.bind("<Configure>", _on_canvas_configure)
 
-        def _on_inner_configure(e):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-        self._grid_inner.bind("<Configure>", _on_inner_configure)
-
-        # マウスホイールでスクロール (macOS / Linux 両対応)
+        # マウスホイール (macOS では delta が小さい)
         def _on_mousewheel(e):
             canvas.yview_scroll(int(-e.delta / 3), "units")
         canvas.bind_all("<MouseWheel>", _on_mousewheel, add="+")
@@ -837,71 +857,174 @@ class MainApp:
             debug(f"favorites load failed: {exc}")
             self._favorites_set = set()
 
+    def _collect_grid_candidates(self) -> list[str]:
+        """フィルタ適用後の候補 UUID リストを返す。"""
+        filter_q = (self._grid_filter_var.get() or "").strip().lower() if self._grid_filter_var else ""
+        fav_only = bool(self._grid_fav_only_var and self._grid_fav_only_var.get())
+        candidates: list[str] = []
+        seen_in_entries: set[str] = set()
+        for entry in self.entries:
+            uuid = entry["uuid"]
+            seen_in_entries.add(uuid)
+            if uuid not in self._converted_dirs:
+                continue
+            if fav_only and uuid not in self._favorites_set:
+                continue
+            if filter_q and filter_q not in uuid.lower():
+                continue
+            candidates.append(uuid)
+        # entries に無い UUID も拾う
+        for uuid in sorted(self._converted_dirs - seen_in_entries):
+            if fav_only and uuid not in self._favorites_set:
+                continue
+            if filter_q and filter_q not in uuid.lower():
+                continue
+            candidates.append(uuid)
+        return candidates
+
+    def _calc_grid_cols(self) -> int:
+        try:
+            canvas_w = max(1, self._grid_canvas.winfo_width())
+        except Exception:  # noqa: BLE001
+            canvas_w = 1100
+        return max(1, canvas_w // (_GRID_CARD_W + _GRID_CARD_GAP))
+
     def _populate_grid(self):
-        """現在の状態 (HLS済 + フィルタ) でグリッドカードを再描画。"""
+        """フィルタ変更/初期表示時に呼ばれる。layout を組み立てて viewport だけ描画。"""
         if not self._grid_built:
             return
-        # 既存カードを破棄
-        for w in list(self._grid_inner.children.values()):
-            w.destroy()
-        self._grid_cards.clear()
 
         # 最新の favorites を取得
         self._refresh_favorites_set()
 
-        # 表示対象: converted/<uuid>/ がある entries
-        # 一覧タブと同じ entries 構造を流用
-        candidates = []
-        filter_q = (self._grid_filter_var.get() or "").strip().lower() if self._grid_filter_var else ""
-        for entry in self.entries:
-            uuid = entry["uuid"]
-            if uuid not in self._converted_dirs:
-                continue
-            if self._grid_fav_only_var and self._grid_fav_only_var.get():
-                if uuid not in self._favorites_set:
-                    continue
-            if filter_q and filter_q not in uuid.lower():
-                continue
-            candidates.append(uuid)
+        # 既存の widget を全消去 (フィルタ変更時など)
+        for w in list(self._grid_inner.children.values()):
+            try:
+                w.destroy()
+            except tk.TclError:
+                pass
+        self._grid_cards.clear()
 
-        # converted/ にあるが entries に無い UUID も拾う (TS なし変換だけのケース)
-        seen = {e["uuid"] for e in self.entries}
-        for uuid in sorted(self._converted_dirs - seen):
-            if self._grid_fav_only_var and self._grid_fav_only_var.get():
-                if uuid not in self._favorites_set:
-                    continue
-            if filter_q and filter_q not in uuid.lower():
-                continue
-            candidates.append(uuid)
-
+        candidates = self._collect_grid_candidates()
         if not candidates:
             empty = tk.Label(
                 self._grid_inner,
                 text="(条件に一致する HLS 済み動画がありません)",
                 bg="#0a0c10", fg="#8b93a1", padx=20, pady=20, font=("", 12),
             )
-            empty.grid(row=0, column=0, padx=10, pady=10)
+            empty.place(x=20, y=20)
+            self._grid_layout = []
+            self._grid_total_h = 60
+            try:
+                self._grid_inner.configure(height=60)
+                self._grid_canvas.configure(scrollregion=(0, 0, 0, 60))
+            except tk.TclError:
+                pass
             self._grid_count_label.config(text="")
             return
 
-        # 列数: canvas 幅 / カード幅 (パディング込み)
+        # レイアウトのみ計算 (widget は作らない)
+        self._grid_candidates = candidates
+        self._recompute_layout()
+        self._grid_count_label.config(text=f"{len(candidates)} 件")
+        # スクロール先頭にリセット
         try:
-            canvas_w = self._grid_canvas.winfo_width()
-        except Exception:  # noqa: BLE001
-            canvas_w = 1100
-        cols = max(1, canvas_w // (_GRID_CARD_W + 16))
+            self._grid_canvas.yview_moveto(0)
+        except tk.TclError:
+            pass
+        # ビューポートに見える分だけ描画
+        self._render_visible_cards()
 
+    def _recompute_layout(self):
+        """列数 + カード位置 + scrollregion を再計算 (widget は作らない)。"""
+        candidates = getattr(self, "_grid_candidates", [])
+        cols = self._calc_grid_cols()
+        self._grid_cols = cols
+        layout: list[tuple[str, int, int]] = []
         for i, uuid in enumerate(candidates):
             row, col = divmod(i, cols)
-            self._render_grid_card(self._grid_inner, uuid, row, col)
+            x = col * (_GRID_CARD_W + _GRID_CARD_GAP) + _GRID_CARD_GAP
+            y = row * (_GRID_CARD_FULL_H + _GRID_CARD_GAP) + _GRID_CARD_GAP
+            layout.append((uuid, x, y))
+        self._grid_layout = layout
+        rows = (len(candidates) + cols - 1) // cols
+        total_h = rows * (_GRID_CARD_FULL_H + _GRID_CARD_GAP) + _GRID_CARD_GAP
+        self._grid_total_h = total_h
+        try:
+            # inner Frame の論理高さ。実 widget は viewport 内のみ存在する。
+            self._grid_inner.configure(height=total_h)
+            # scrollregion の幅は canvas 幅に追従させる (横スクロールしない)
+            canvas_w = max(self._grid_canvas.winfo_width(),
+                           cols * (_GRID_CARD_W + _GRID_CARD_GAP) + _GRID_CARD_GAP)
+            self._grid_canvas.configure(scrollregion=(0, 0, canvas_w, total_h))
+        except tk.TclError:
+            pass
+        # レイアウトが変わったので既存の widget は座標が古い → 全部破棄して再描画
+        for uuid in list(self._grid_cards.keys()):
+            self._destroy_card(uuid)
 
-        self._grid_count_label.config(text=f"{len(candidates)} 件")
+    def _viewport_y_range(self) -> tuple[int, int]:
+        """canvas の現在のビューポート (top_y, bottom_y) を返す。"""
+        try:
+            canvas = self._grid_canvas
+            top = int(canvas.canvasy(0))
+            bottom = top + max(canvas.winfo_height(), 1)
+        except tk.TclError:
+            return (0, 0)
+        return (top, bottom)
 
-    def _render_grid_card(self, parent, uuid: str, row: int, col: int):
-        """1 つのカードを描画して self._grid_cards[uuid] に登録。"""
+    def _render_visible_cards(self):
+        """現在の viewport (+バッファ) に該当する UUID だけ widget を作る。
+        範囲外のものは破棄してメモリを解放する。"""
+        self._grid_render_pending = False
+        if not self._grid_built or not self._grid_layout:
+            return
+
+        top, bottom = self._viewport_y_range()
+        buffer_px = _GRID_VIEWPORT_BUFFER_ROWS * (_GRID_CARD_FULL_H + _GRID_CARD_GAP)
+        top_pad = top - buffer_px
+        bottom_pad = bottom + buffer_px
+
+        # 必要な UUID
+        needed: set[str] = set()
+        for uuid, x, y in self._grid_layout:
+            if y + _GRID_CARD_FULL_H < top_pad:
+                continue
+            if y > bottom_pad:
+                break  # layout は y 昇順なので以降不要
+            needed.add(uuid)
+
+        # 既存にあって不要になったものを破棄
+        for uuid in list(self._grid_cards.keys()):
+            if uuid not in needed:
+                self._destroy_card(uuid)
+
+        # 新たに必要な分だけ作る
+        for uuid, x, y in self._grid_layout:
+            if uuid not in needed:
+                continue
+            if uuid in self._grid_cards:
+                continue
+            self._render_grid_card_at(self._grid_inner, uuid, x, y)
+
+    def _destroy_card(self, uuid: str):
+        card = self._grid_cards.pop(uuid, None)
+        if not card:
+            return
+        # 進行中の slideshow タイマーを止める
+        st = card.get("slideshow")
+        if st:
+            self._cancel_slideshow_step(st)
+        try:
+            card["frame"].destroy()
+        except tk.TclError:
+            pass
+
+    def _render_grid_card_at(self, parent, uuid: str, x: int, y: int):
+        """指定座標 (x, y) にカードを place で配置。"""
         card = tk.Frame(parent, bg="#1a1d24", padx=2, pady=2,
                         highlightbackground="#272c36", highlightthickness=1)
-        card.grid(row=row, column=col, padx=6, pady=6, sticky="n")
+        card.place(x=x, y=y, width=_GRID_CARD_W, height=_GRID_CARD_FULL_H)
 
         # サムネ Label (16:9 placeholder)
         thumb = tk.Label(
