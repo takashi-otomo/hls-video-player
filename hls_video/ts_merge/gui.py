@@ -537,6 +537,10 @@ class MainApp:
         self._grid_total_h: int = 0
         self._grid_render_pending: bool = False
         self._slideshow_loading: set[str] = set()
+        # サムネロード用の bounded queue (Drive FUSE でも UI を詰まらせないため)
+        import queue as _queue
+        self._poster_queue: _queue.Queue = _queue.Queue()
+        self._poster_workers_started = False
 
         debug("Tk() 開始")
         self.root = tk.Tk()
@@ -767,12 +771,18 @@ class MainApp:
             return
         # idx 1 = グリッドタブ
         if idx == 1 and not self._grid_built:
+            t0 = time.perf_counter()
             self._build_grid_view()
+            t1 = time.perf_counter()
             self._grid_built = True
+            # populate は async-friendly: layout 計算 → 即 viewport 描画 →
+            # favorites は背景で読む
             self._populate_grid()
+            t2 = time.perf_counter()
+            debug(f"grid: build={int((t1-t0)*1000)}ms populate={int((t2-t1)*1000)}ms")
         elif idx == 1 and self._grid_built:
-            # ★ お気に入りはタブ切替の度に最新化 (web GUI で変えた可能性)
-            self._refresh_favorites_set()
+            # ★ お気に入りはタブ切替の度に背景で再読込 (Drive FUSE で遅延しても UI 止めない)
+            self._async_refresh_favorites()
 
     def _build_grid_view(self):
         """グリッドタブの中身を構築 (Canvas + 内部 Frame + フィルタバー)。"""
@@ -850,12 +860,52 @@ class MainApp:
         canvas.bind_all("<MouseWheel>", _on_mousewheel, add="+")
 
     def _refresh_favorites_set(self):
-        """favorites.json を読み直してメモリにキャッシュ。"""
+        """favorites.json を読み直してメモリにキャッシュ (同期、Drive FUSE で遅い可能性あり)。"""
         try:
             self._favorites_set = _favorites.load_favorites(self.folder)
         except Exception as exc:  # noqa: BLE001
             debug(f"favorites load failed: {exc}")
             self._favorites_set = set()
+
+    def _async_refresh_favorites(self):
+        """favorites.json を背景スレッドで読み、完了後にカードの ★ 表示を更新。"""
+        gen = self._scan_generation
+
+        def _worker():
+            t0 = time.perf_counter()
+            try:
+                favs = _favorites.load_favorites(self.folder)
+            except Exception as exc:  # noqa: BLE001
+                debug(f"favorites async load failed: {exc}")
+                favs = set()
+            elapsed = (time.perf_counter() - t0) * 1000
+            self.root.after(
+                0, lambda f=favs, g=gen, e=elapsed:
+                self._on_favorites_loaded(f, g, e),
+            )
+
+        threading.Thread(
+            target=_worker, name="favs-loader", daemon=True,
+        ).start()
+
+    def _on_favorites_loaded(self, favs: set, gen: int, elapsed_ms: float):
+        if gen != self._scan_generation:
+            return
+        self._favorites_set = favs
+        debug(f"favorites loaded: {len(favs)} entries ({elapsed_ms:.0f}ms)")
+        # 既に描画されているカードの ★ 表示を最新化
+        for uuid, card in list(self._grid_cards.items()):
+            try:
+                is_fav = uuid in favs
+                btn = card.get("fav_btn")
+                if btn:
+                    btn.configure(
+                        text=("★" if is_fav else "☆"),
+                        bg=("#2a2620" if is_fav else "#1a1d24"),
+                        fg=("#ffc857" if is_fav else "#888"),
+                    )
+            except tk.TclError:
+                pass
 
     def _collect_grid_candidates(self) -> list[str]:
         """フィルタ適用後の候補 UUID リストを返す。"""
@@ -890,12 +940,16 @@ class MainApp:
         return max(1, canvas_w // (_GRID_CARD_W + _GRID_CARD_GAP))
 
     def _populate_grid(self):
-        """フィルタ変更/初期表示時に呼ばれる。layout を組み立てて viewport だけ描画。"""
+        """フィルタ変更/初期表示時に呼ばれる。layout を組み立てて viewport だけ描画。
+
+        I/O は一切ブロックしない:
+          - favorites.json は背景で読む (_async_refresh_favorites)
+          - サムネ画像も別スレッドで遅延ロード
+          - layout 計算は純メモリ演算 (1280 件で <10ms)
+        """
         if not self._grid_built:
             return
-
-        # 最新の favorites を取得
-        self._refresh_favorites_set()
+        t0 = time.perf_counter()
 
         # 既存の widget を全消去 (フィルタ変更時など)
         for w in list(self._grid_inner.children.values()):
@@ -904,8 +958,10 @@ class MainApp:
             except tk.TclError:
                 pass
         self._grid_cards.clear()
+        t_destroy = time.perf_counter()
 
         candidates = self._collect_grid_candidates()
+        t_collect = time.perf_counter()
         if not candidates:
             empty = tk.Label(
                 self._grid_inner,
@@ -926,6 +982,7 @@ class MainApp:
         # レイアウトのみ計算 (widget は作らない)
         self._grid_candidates = candidates
         self._recompute_layout()
+        t_layout = time.perf_counter()
         self._grid_count_label.config(text=f"{len(candidates)} 件")
         # スクロール先頭にリセット
         try:
@@ -934,6 +991,18 @@ class MainApp:
             pass
         # ビューポートに見える分だけ描画
         self._render_visible_cards()
+        t_render = time.perf_counter()
+        debug(
+            f"_populate_grid: total={int((t_render-t0)*1000)}ms "
+            f"(destroy={int((t_destroy-t0)*1000)} "
+            f"collect={int((t_collect-t_destroy)*1000)} "
+            f"layout={int((t_layout-t_collect)*1000)} "
+            f"render={int((t_render-t_layout)*1000)}) "
+            f"candidates={len(candidates)}"
+        )
+
+        # 背景で favorites を読み込み (Drive FUSE で時間がかかっても UI は止まらない)
+        self._async_refresh_favorites()
 
     def _recompute_layout(self):
         """列数 + カード位置 + scrollregion を再計算 (widget は作らない)。"""
@@ -1136,31 +1205,57 @@ class MainApp:
                 pass
             state["after_id"] = None
 
+    def _ensure_poster_workers(self, n: int = 4):
+        """サムネ用 worker thread を最大 n 個起動 (起動済みなら何もしない)。
+        各 worker は self._poster_queue から uuid を取り出して順次処理する。"""
+        if self._poster_workers_started:
+            return
+        self._poster_workers_started = True
+
+        def _worker_loop():
+            while True:
+                try:
+                    uuid = self._poster_queue.get()
+                except Exception:  # noqa: BLE001
+                    return
+                if uuid is None:
+                    return
+                if uuid in self._poster_cache:
+                    self._poster_queue.task_done()
+                    continue
+                out_dir = output_dir_for(uuid, Path(self.folder))
+                poster = out_dir / "thumbs" / "poster.png"
+                # poster が無ければ thumb_50 を fallback (どちらも .is_file() で 1 stat)
+                if poster.is_file():
+                    src = poster
+                else:
+                    fallback = out_dir / "thumbs" / thumb_filename(50)
+                    src = fallback if fallback.is_file() else None
+                if src is None:
+                    self._poster_queue.task_done()
+                    continue
+                try:
+                    img = Image.open(src)
+                    img.thumbnail((_GRID_THUMB_W, _GRID_THUMB_H), Image.LANCZOS)
+                    self.root.after(
+                        0, lambda i=img, u=uuid: self._on_poster_loaded(u, i),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    debug(f"poster load failed {uuid}: {exc}")
+                self._poster_queue.task_done()
+
+        for i in range(n):
+            threading.Thread(
+                target=_worker_loop, name=f"poster-w{i}", daemon=True,
+            ).start()
+
     def _enqueue_poster_load(self, uuid: str):
-        """poster.png を background thread でロードしてサムネ Label に貼る。"""
+        """poster.png のロードを bounded queue に投入 (UI を詰まらせない)。"""
         if uuid in self._poster_cache:
             self._apply_poster(uuid, self._poster_cache[uuid])
             return
-        out_dir = output_dir_for(uuid, Path(self.folder))
-        poster = out_dir / "thumbs" / "poster.png"
-        # poster が無ければ thumb_50 を fallback
-        src = poster if poster.is_file() else (out_dir / "thumbs" / thumb_filename(50))
-        if not src.is_file():
-            return
-
-        def _worker():
-            try:
-                img = Image.open(src)
-                img.thumbnail((_GRID_THUMB_W, _GRID_THUMB_H), Image.LANCZOS)
-                self.root.after(
-                    0, lambda i=img, u=uuid: self._on_poster_loaded(u, i),
-                )
-            except Exception as exc:  # noqa: BLE001
-                debug(f"poster load failed {uuid}: {exc}")
-
-        threading.Thread(
-            target=_worker, name=f"poster-{uuid[:8]}", daemon=True,
-        ).start()
+        self._ensure_poster_workers()
+        self._poster_queue.put(uuid)
 
     def _on_poster_loaded(self, uuid: str, img):
         try:
