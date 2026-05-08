@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hls-video-player"
 version = "0.1.0"
-description = "MP4 → HLS streaming library with sprite-based seekbar preview"
+description = "MP4 → HLS streaming library with sprite-based seekbar preview + TS merge GUI"
 requires-python = ">=3.10"
 dependencies = []
 
@@ -16,10 +16,17 @@ app = [
     "uvicorn[standard]>=0.32",
     "python-multipart>=0.0.12",
 ]
+gui = [
+    "Pillow>=10.0",         # ts-merge --gui のサムネ表示
+]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
 ]
+
+[project.scripts]
+ts-merge = "hls_video.ts_merge.cli:main"
+hls-convert = "hls_video.library_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
