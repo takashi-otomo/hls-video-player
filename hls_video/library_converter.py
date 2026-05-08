@@ -6,12 +6,18 @@
 - HLS 変換: hls_converter.convert_mp4_to_hls
 - サムネ: thumbnail_generator.generate_thumbnails (5 枚 + poster.png)
 - メタ: meta.json に duration / thumbs[] / hls master 相対パス等を書き出し
+
+中断検出 (重要):
+- 変換開始時に `.converting` マーカーファイルを作成し、正常終了時のみ削除する
+- `is_already_converted` はマーカーが残っているものは未完了扱いで再変換対象に
+- これによりプロセス kill / OOM / kernel リセットなどによる中途半端出力を確実に検出
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import shutil
 import time
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
@@ -28,6 +34,9 @@ from hls_video.thumbnail_generator import (
 logger = logging.getLogger(__name__)
 
 VIDEO_EXTS: frozenset[str] = frozenset({".mp4", ".mov", ".mkv", ".webm", ".m4v"})
+
+# 変換中マーカー: 開始時に作成、正常終了時のみ削除
+CONVERTING_MARKER = ".converting"
 
 
 @dataclass
@@ -50,14 +59,59 @@ def output_dir_for(stem: str, lib_root: Optional[Path] = None) -> Path:
     return converted_root(lib_root) / stem
 
 
+def is_converting(stem: str, lib_root: Optional[Path] = None) -> bool:
+    """変換中マーカーがあるか判定。中断された変換を検出するために使う。"""
+    return (output_dir_for(stem, lib_root) / CONVERTING_MARKER).exists()
+
+
 def is_already_converted(stem: str, lib_root: Optional[Path] = None) -> bool:
-    """master.m3u8 + poster.png + meta.json の存在で「変換済」と判定。"""
+    """変換が完全に終了しているか判定。
+
+    以下すべてが揃っている場合のみ True:
+      - .converting マーカーが存在しない (= 中断されていない)
+      - hls/master.m3u8
+      - thumbs/poster.png
+      - thumbs/thumb_{05,30,50,60,80}.jpg (5 枚すべて)
+      - meta.json (parse 可能)
+    """
     out = output_dir_for(stem, lib_root)
-    return (
-        (out / "hls" / "master.m3u8").exists()
-        and (out / "thumbs" / "poster.png").exists()
-        and (out / "meta.json").exists()
-    )
+
+    # 中断マーカーがあれば未完了扱い (kill された変換の検出)
+    if (out / CONVERTING_MARKER).exists():
+        return False
+
+    if not (out / "hls" / "master.m3u8").exists():
+        return False
+    if not (out / "thumbs" / "poster.png").exists():
+        return False
+    # 5 枚のサムネが揃っているか
+    thumbs_dir = out / "thumbs"
+    for p in THUMB_PERCENTS:
+        if not (thumbs_dir / thumb_filename(p)).exists():
+            return False
+    # meta.json が parse 可能か (空ファイルや破損 JSON を除外)
+    meta_path = out / "meta.json"
+    if not meta_path.exists():
+        return False
+    try:
+        json.loads(meta_path.read_text() or "{}")
+    except Exception:
+        return False
+    return True
+
+
+def _cleanup_partial_output(out_dir: Path) -> None:
+    """中途半端な出力 (hls/, thumbs/, meta.json) を削除する。マーカーは触らない。"""
+    for sub in ("hls", "thumbs"):
+        target = out_dir / sub
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+    meta_path = out_dir / "meta.json"
+    if meta_path.exists():
+        try:
+            meta_path.unlink()
+        except OSError:
+            pass
 
 
 def _write_meta(
@@ -113,6 +167,7 @@ def convert_one(
     """1 本の動画を HLS + サムネへ変換する。
 
     既に変換済みかつ force=False ならスキップ（ConvertResult.skipped=True）。
+    中断マーカー (`.converting`) が残っているものは中途半端な出力を掃除して再変換する。
     """
     src = Path(source_path).resolve()
     if not src.is_file():
@@ -124,6 +179,7 @@ def convert_one(
     out_dir = output_dir_for(stem, lib_root)
     hls_dir = out_dir / "hls"
     thumbs_dir = out_dir / "thumbs"
+    marker = out_dir / CONVERTING_MARKER
 
     if not force and is_already_converted(stem, lib_root):
         return ConvertResult(
@@ -137,47 +193,73 @@ def convert_one(
         )
 
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # 中途半端な出力を完全クリーンアップ (中断分 / force / 不完全状態いずれにも対応)
+    interrupted = marker.exists()
+    if interrupted:
+        logger.warning("found interrupted conversion marker for %s — cleaning up", stem)
+    _cleanup_partial_output(out_dir)
+
     hls_dir.mkdir(parents=True, exist_ok=True)
     thumbs_dir.mkdir(parents=True, exist_ok=True)
 
+    # 中断マーカーを立てる (失敗時に残れば次回の再変換対象になる)
+    marker.write_text(
+        json.dumps({
+            "started_at": datetime.now(tz=timezone.utc).isoformat(),
+            "source": src.name,
+        }, ensure_ascii=False)
+    )
+
     t0 = time.monotonic()
-    logger.info("convert start: %s → %s", src, out_dir)
+    logger.info("convert start: %s → %s%s", src, out_dir,
+                " (resume from interrupted)" if interrupted else "")
 
-    # 1) probe
-    duration = probe_duration_seconds(str(src))
-    stream = probe_video_stream(str(src))
+    try:
+        # 1) probe
+        duration = probe_duration_seconds(str(src))
+        stream = probe_video_stream(str(src))
 
-    # 2) HLS 変換
-    hls_result = convert_mp4_to_hls(
-        input_path=str(src),
-        output_dir=str(hls_dir),
-        duration_seconds=duration,
-        input_width=stream.get("width"),
-        input_height=stream.get("height"),
-        input_codec=stream.get("codec_name"),
-        input_pix_fmt=stream.get("pix_fmt"),
-        input_field_order=stream.get("field_order"),
-    )
+        # 2) HLS 変換
+        hls_result = convert_mp4_to_hls(
+            input_path=str(src),
+            output_dir=str(hls_dir),
+            duration_seconds=duration,
+            input_width=stream.get("width"),
+            input_height=stream.get("height"),
+            input_codec=stream.get("codec_name"),
+            input_pix_fmt=stream.get("pix_fmt"),
+            input_field_order=stream.get("field_order"),
+        )
 
-    # 3) サムネ + poster
-    thumbs = generate_thumbnails(
-        input_path=str(src),
-        output_dir=str(thumbs_dir),
-        duration_seconds=duration,
-    )
+        # 3) サムネ + poster
+        thumbs = generate_thumbnails(
+            input_path=str(src),
+            output_dir=str(thumbs_dir),
+            duration_seconds=duration,
+        )
 
-    # 4) meta.json
-    _write_meta(
-        out_dir=out_dir,
-        stem=stem,
-        source_filename=src.name,
-        duration=duration,
-        width=stream.get("width") or 0,
-        height=stream.get("height") or 0,
-        codec=stream.get("codec_name") or "",
-        backend=hls_result.get("backend", "?"),
-        variants=hls_result.get("variants", []),
-    )
+        # 4) meta.json
+        _write_meta(
+            out_dir=out_dir,
+            stem=stem,
+            source_filename=src.name,
+            duration=duration,
+            width=stream.get("width") or 0,
+            height=stream.get("height") or 0,
+            codec=stream.get("codec_name") or "",
+            backend=hls_result.get("backend", "?"),
+            variants=hls_result.get("variants", []),
+        )
+    except BaseException:
+        # 失敗 / 中断時はマーカーをそのまま残す → 次回 CLI で再変換対象になる
+        raise
+
+    # 全工程成功 → マーカー削除して「変換済み」状態にする
+    try:
+        marker.unlink()
+    except OSError:
+        pass
 
     elapsed = time.monotonic() - t0
     logger.info("convert done : %s (%.1fs)", stem, elapsed)

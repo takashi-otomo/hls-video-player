@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from hls_video.library_converter import (
-    VIDEO_EXTS, convert_one, is_already_converted, scan_library,
+    VIDEO_EXTS, convert_one, is_already_converted, is_converting, scan_library,
 )
 from hls_video.library_settings import get_library_root
 from hls_video.logging_setup import setup_logging
@@ -50,7 +50,13 @@ def _process_one(src: Path, lib_root: Path, force: bool) -> dict:
             _log(f"⏭ スキップ (変換済): {src.name}", base)
             return {"base": base, "status": "skipped", "elapsed": 0.0}
 
-        _log(f"🎬 変換開始: {src.name} ({_format_size(src.stat().st_size)})", base)
+        # 中断された変換を検出した場合は明示的にログを出す
+        was_interrupted = is_converting(base, lib_root)
+        if was_interrupted:
+            _log(f"♻️  前回の変換が中断されていたので再変換: {src.name}", base)
+        else:
+            _log(f"🎬 変換開始: {src.name} ({_format_size(src.stat().st_size)})", base)
+
         result = convert_one(src, lib_root=lib_root, force=force)
         if result.skipped:
             _log(f"⏭ スキップ: {src.name}", base)
@@ -117,17 +123,31 @@ def main(argv: list[str] | None = None) -> int:
 
     targets: list[Path] = []
     skipped = 0
+    interrupted_count = 0
     for s in sources:
         if not args.force and is_already_converted(s.stem, lib_root):
             skipped += 1
             continue
+        if is_converting(s.stem, lib_root):
+            interrupted_count += 1
         targets.append(s)
 
-    _log(f"検出: {len(sources)} 件 / 変換対象: {len(targets)} 件 (スキップ: {skipped})")
+    summary = (
+        f"検出: {len(sources)} 件 / 変換対象: {len(targets)} 件 "
+        f"(スキップ: {skipped})"
+    )
+    if interrupted_count:
+        summary += f"  ⚠ 中断分の再変換: {interrupted_count} 件"
+    _log(summary)
 
     if args.dry_run:
         for s in sources:
-            mark = "✓" if is_already_converted(s.stem, lib_root) else "○"
+            if is_already_converted(s.stem, lib_root):
+                mark = "✓"
+            elif is_converting(s.stem, lib_root):
+                mark = "♻️ "  # 中断分
+            else:
+                mark = "○"
             _log(f"  {mark} {s.name} ({_format_size(s.stat().st_size)})")
         return 0
 
