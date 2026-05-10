@@ -73,14 +73,34 @@ def player_page_html(video_id: str) -> str:
     padding-right: calc(0.75rem + env(safe-area-inset-right));
   }}
   .topbar.show {{ display: flex; }}
-  .topbar a.back {{
+  .topbar .nav-btn {{
     color: #4aa8ff; text-decoration: none;
     font-size: 0.9rem; padding: 0.35rem 0.7rem;
     border: 1px solid #272c36; border-radius: 4px;
     background: #1a1d24;
     white-space: nowrap;
+    cursor: pointer;
+    font-family: inherit;
   }}
-  .topbar a.back:hover {{ border-color: #4aa8ff; background: #22262f; }}
+  .topbar .nav-btn:hover:not(:disabled) {{ border-color: #4aa8ff; background: #22262f; }}
+  .topbar .nav-btn:disabled {{ opacity: 0.4; cursor: not-allowed; }}
+  .topbar .fav-btn {{
+    background: #2a2f3a; color: #c8d0dc;
+    border: 1px solid #272c36; border-radius: 4px;
+    padding: 0.35rem 0.7rem; font-size: 0.95rem;
+    cursor: pointer; font-family: inherit;
+    white-space: nowrap;
+  }}
+  .topbar .fav-btn.on {{ background: #3d3320; color: #ffd667; border-color: #ffc857; }}
+  .topbar .fav-btn:hover {{ filter: brightness(1.15); }}
+  .topbar .close-btn {{
+    background: #4a1f1f; color: #ffb3b3;
+    border: 1px solid #6a2c2c; border-radius: 4px;
+    padding: 0.35rem 0.7rem; font-size: 0.9rem;
+    cursor: pointer; font-family: inherit;
+    white-space: nowrap;
+  }}
+  .topbar .close-btn:hover {{ background: #5e2828; border-color: #d04444; }}
   .topbar .title {{
     color: #e6e8eb; flex: 1; font-size: 0.85rem;
     font-family: "SF Mono", Menlo, monospace;
@@ -103,7 +123,9 @@ def player_page_html(video_id: str) -> str:
     }}
     .topbar.show:hover {{ opacity: 1; }}
     .topbar.show .title {{ display: none; }}
-    .topbar.show a.back {{
+    .topbar.show .nav-btn,
+    .topbar.show .fav-btn,
+    .topbar.show .close-btn {{
       padding: 0.22rem 0.55rem; font-size: 0.78rem;
       background: rgba(26, 29, 36, 0.9);
     }}
@@ -121,8 +143,11 @@ def player_page_html(video_id: str) -> str:
 <body>
 <div id="root">
   <div class="topbar" id="topbar">
-    <a class="back" href="/play">← 一覧</a>
+    <button type="button" class="nav-btn" id="prev-btn" disabled>← 前</button>
+    <button type="button" class="fav-btn" id="fav-btn" aria-pressed="false">☆ お気に入り</button>
     <span class="title">{safe_id}</span>
+    <button type="button" class="nav-btn" id="next-btn" disabled>次 →</button>
+    <button type="button" class="close-btn" id="close-btn" title="このタブを閉じる">✕ 閉じる</button>
   </div>
   <div class="wrap"><div id="mount"></div></div>
 </div>
@@ -132,7 +157,69 @@ def player_page_html(video_id: str) -> str:
   if (window.top === window.self) {{
     document.getElementById('topbar').classList.add('show');
   }}
-  window.HlsPlayer.init(document.getElementById("mount"), "{safe_id}");
+  const CURRENT_ID = "{safe_id}";
+  window.HlsPlayer.init(document.getElementById("mount"), CURRENT_ID);
+
+  // ── トップバーの操作 ──
+  const prevBtn = document.getElementById('prev-btn');
+  const nextBtn = document.getElementById('next-btn');
+  const favBtn  = document.getElementById('fav-btn');
+  const closeBtn = document.getElementById('close-btn');
+
+  // 1) 一覧から前後の動画 ID を取得
+  fetch('/api/videos').then(r => r.json()).then(videos => {{
+    const ids = videos.map(v => v.id);
+    const idx = ids.indexOf(CURRENT_ID);
+    if (idx > 0) {{
+      prevBtn.disabled = false;
+      prevBtn.onclick = () => {{ window.location.href = '/player/' + encodeURIComponent(ids[idx - 1]); }};
+    }}
+    if (idx >= 0 && idx < ids.length - 1) {{
+      nextBtn.disabled = false;
+      nextBtn.onclick = () => {{ window.location.href = '/player/' + encodeURIComponent(ids[idx + 1]); }};
+    }}
+    // 現在の動画のお気に入り状態
+    const cur = videos.find(v => v.id === CURRENT_ID);
+    if (cur) updateFavButton(!!cur.isFavorite);
+  }}).catch(err => console.error('failed to load /api/videos', err));
+
+  function updateFavButton(isOn) {{
+    favBtn.classList.toggle('on', isOn);
+    favBtn.textContent = isOn ? '★ お気に入り済' : '☆ お気に入り';
+    favBtn.setAttribute('aria-pressed', isOn ? 'true' : 'false');
+  }}
+
+  // 2) ★ お気に入りトグル
+  favBtn.onclick = () => {{
+    const next = !favBtn.classList.contains('on');
+    updateFavButton(next);  // 楽観的更新
+    fetch('/api/favorites/' + encodeURIComponent(CURRENT_ID), {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ favorited: next }}),
+    }})
+      .then(r => r.json())
+      .then(d => updateFavButton(!!d.isFavorite))
+      .catch(err => {{
+        console.error('toggle favorite failed', err);
+        updateFavButton(!next);  // ロールバック
+      }});
+  }};
+
+  // 3) 閉じるボタン (popup なら window.close、駄目なら history.back)
+  closeBtn.onclick = () => {{
+    window.close();
+    // window.close() がブロックされる場合は history.back で戻る
+    setTimeout(() => {{ if (!window.closed) history.back(); }}, 100);
+  }};
+
+  // キーボードショートカット (← / → で前後の動画、F でお気に入り)
+  document.addEventListener('keydown', (e) => {{
+    if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
+    if (e.key === 'ArrowLeft' && !prevBtn.disabled) prevBtn.click();
+    else if (e.key === 'ArrowRight' && !nextBtn.disabled) nextBtn.click();
+    else if (e.key === 'f' || e.key === 'F') favBtn.click();
+  }});
 
   window.addEventListener('orientationchange', () => {{
     setTimeout(() => window.dispatchEvent(new Event('resize')), 150);

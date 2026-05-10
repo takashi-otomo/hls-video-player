@@ -856,10 +856,29 @@ class MainApp:
                 self._render_visible_cards()
         canvas.bind("<Configure>", _on_canvas_configure)
 
-        # マウスホイール (macOS では delta が小さい)
+        # マウスホイール (macOS は delta が ±1〜±10、Win/Linux は ±120 単位)
         def _on_mousewheel(e):
-            canvas.yview_scroll(int(-e.delta / 3), "units")
-        canvas.bind_all("<MouseWheel>", _on_mousewheel, add="+")
+            d = e.delta
+            if abs(d) >= 60:
+                step = -int(d / 120) or (-1 if d > 0 else 1)
+            else:
+                step = -int(d) or (-1 if d > 0 else 1)
+            try:
+                canvas.yview_scroll(step, "units")
+            except tk.TclError:
+                pass
+        # bind_all より bind の方が他の Notebook タブでスクロールが暴れない
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        # canvas 内の widget でホイールを動かしてもスクロールするよう、子孫も対象に
+        def _bind_wheel_recursive(w):
+            try:
+                w.bind("<MouseWheel>", _on_mousewheel)
+            except tk.TclError:
+                pass
+            for c in w.winfo_children():
+                _bind_wheel_recursive(c)
+        # build 後の widget はそのつど bind する (新規カード生成時のため)
+        self._bind_wheel = _on_mousewheel
 
     @staticmethod
     def _make_clickable(label: tk.Label, *, on_click, hover_bg: str, normal_bg: str):
@@ -986,7 +1005,18 @@ class MainApp:
             canvas_w = max(1, self._grid_canvas.winfo_width())
         except Exception:  # noqa: BLE001
             canvas_w = 1100
-        return max(1, canvas_w // (_GRID_CARD_W + _GRID_CARD_GAP))
+        # 最小カード幅を _GRID_CARD_W として、入る限り列を増やす
+        return max(1, (canvas_w - _GRID_CARD_GAP) // (_GRID_CARD_W + _GRID_CARD_GAP))
+
+    def _calc_card_width(self, cols: int) -> int:
+        """canvas 幅と列数から実際のカード幅を計算 (画面幅一杯に広げる)。"""
+        try:
+            canvas_w = max(1, self._grid_canvas.winfo_width())
+        except Exception:  # noqa: BLE001
+            canvas_w = 1100
+        # 余白 = (cols+1) × _GRID_CARD_GAP、残りを cols 等分
+        avail = canvas_w - (cols + 1) * _GRID_CARD_GAP
+        return max(_GRID_CARD_W, avail // cols)
 
     def _populate_grid(self):
         """フィルタ変更/初期表示時に呼ばれる。layout を組み立てて viewport だけ描画。
@@ -1054,32 +1084,47 @@ class MainApp:
         self._async_refresh_favorites()
 
     def _recompute_layout(self):
-        """列数 + カード位置 + scrollregion を再計算 (widget は作らない)。"""
+        """列数 + カード位置 + scrollregion を再計算 (widget は作らない)。
+
+        カード幅を canvas 幅に合わせて伸縮させ、画面右の不要余白を埋める。
+        """
         candidates = getattr(self, "_grid_candidates", [])
         cols = self._calc_grid_cols()
+        card_w = self._calc_card_width(cols)
+        # サムネ幅もカードに合わせる (両端 padding 各 10 を引く)
+        thumb_w = max(80, card_w - 20)
+        thumb_h = int(thumb_w * 9 / 16)
+        # カード高さもサムネ高さに合わせて再計算
+        card_full_h = thumb_h + 110
         self._grid_cols = cols
+        self._grid_card_w = card_w
+        self._grid_card_full_h = card_full_h
+        self._grid_thumb_w = thumb_w
+        self._grid_thumb_h = thumb_h
+
         layout: list[tuple[str, int, int]] = []
         for i, uuid in enumerate(candidates):
             row, col = divmod(i, cols)
-            x = col * (_GRID_CARD_W + _GRID_CARD_GAP) + _GRID_CARD_GAP
-            y = row * (_GRID_CARD_FULL_H + _GRID_CARD_GAP) + _GRID_CARD_GAP
+            x = col * (card_w + _GRID_CARD_GAP) + _GRID_CARD_GAP
+            y = row * (card_full_h + _GRID_CARD_GAP) + _GRID_CARD_GAP
             layout.append((uuid, x, y))
         self._grid_layout = layout
         rows = (len(candidates) + cols - 1) // cols
-        total_h = rows * (_GRID_CARD_FULL_H + _GRID_CARD_GAP) + _GRID_CARD_GAP
+        total_h = rows * (card_full_h + _GRID_CARD_GAP) + _GRID_CARD_GAP
         self._grid_total_h = total_h
         try:
-            # inner Frame の論理高さ。実 widget は viewport 内のみ存在する。
             self._grid_inner.configure(height=total_h)
-            # scrollregion の幅は canvas 幅に追従させる (横スクロールしない)
             canvas_w = max(self._grid_canvas.winfo_width(),
-                           cols * (_GRID_CARD_W + _GRID_CARD_GAP) + _GRID_CARD_GAP)
+                           cols * (card_w + _GRID_CARD_GAP) + _GRID_CARD_GAP)
             self._grid_canvas.configure(scrollregion=(0, 0, canvas_w, total_h))
         except tk.TclError:
             pass
         # レイアウトが変わったので既存の widget は座標が古い → 全部破棄して再描画
         for uuid in list(self._grid_cards.keys()):
             self._destroy_card(uuid)
+        # サムネキャッシュもサイズが変わったので無効化 (新サイズで再ロード)
+        self._poster_cache.clear()
+        self._slideshow_cache.clear()
 
     def _viewport_y_range(self) -> tuple[int, int]:
         """canvas の現在のビューポート (top_y, bottom_y) を返す。"""
@@ -1140,15 +1185,20 @@ class MainApp:
 
     def _render_grid_card_at(self, parent, uuid: str, x: int, y: int):
         """指定座標 (x, y) にカードを place で配置。"""
+        card_w = getattr(self, "_grid_card_w", _GRID_CARD_W)
+        card_h = getattr(self, "_grid_card_full_h", _GRID_CARD_FULL_H)
+        thumb_w = getattr(self, "_grid_thumb_w", _GRID_THUMB_W)
+        thumb_h = getattr(self, "_grid_thumb_h", _GRID_THUMB_H)
+
         card = tk.Frame(parent, bg="#1a1d24", padx=2, pady=2,
                         highlightbackground="#272c36", highlightthickness=1)
-        card.place(x=x, y=y, width=_GRID_CARD_W, height=_GRID_CARD_FULL_H)
+        card.place(x=x, y=y, width=card_w, height=card_h)
 
-        # サムネ Label (16:9 placeholder)
+        # サムネ Label (16:9 placeholder、カード幅に追従)
         thumb = tk.Label(card, bg="#0a0c10", cursor="hand2")
         try:
-            placeholder = tk.PhotoImage(width=_GRID_THUMB_W, height=_GRID_THUMB_H)
-            thumb.configure(image=placeholder, width=_GRID_THUMB_W, height=_GRID_THUMB_H)
+            placeholder = tk.PhotoImage(width=thumb_w, height=thumb_h)
+            thumb.configure(image=placeholder, width=thumb_w, height=thumb_h)
             thumb._placeholder_ref = placeholder  # GC 防止
         except tk.TclError:
             pass
@@ -1158,7 +1208,7 @@ class MainApp:
         title_text = uuid[:38] + ("…" if len(uuid) > 38 else "")
         title_label = tk.Label(
             card, text=title_text, bg="#1a1d24", fg="#e6e8eb",
-            font=("Menlo", 9), wraplength=_GRID_THUMB_W,
+            font=("Menlo", 9), wraplength=thumb_w,
             justify="left", anchor="w",
         )
         title_label.pack(fill=tk.X, padx=6)
@@ -1323,7 +1373,9 @@ class MainApp:
                     if src is not None:
                         try:
                             img = Image.open(src)
-                            img.thumbnail((_GRID_THUMB_W, _GRID_THUMB_H), Image.LANCZOS)
+                            tw = getattr(self, "_grid_thumb_w", _GRID_THUMB_W)
+                            th = getattr(self, "_grid_thumb_h", _GRID_THUMB_H)
+                            img.thumbnail((tw, th), Image.LANCZOS)
                             self.root.after(
                                 0, lambda i=img, u=uuid: self._on_poster_loaded(u, i),
                             )
@@ -1406,12 +1458,14 @@ class MainApp:
         def _worker():
             imgs = []
             try:
+                tw = getattr(self, "_grid_thumb_w", _GRID_THUMB_W)
+                th = getattr(self, "_grid_thumb_h", _GRID_THUMB_H)
                 # 順序: poster → 5%, 30%, 50%, 60%, 80%
                 for src in [poster, *thumb_paths]:
                     if not src.is_file():
                         continue
                     img = Image.open(src)
-                    img.thumbnail((_GRID_THUMB_W, _GRID_THUMB_H), Image.LANCZOS)
+                    img.thumbnail((tw, th), Image.LANCZOS)
                     imgs.append(img)
             except Exception as exc:  # noqa: BLE001
                 debug(f"slideshow load failed {uuid}: {exc}")
