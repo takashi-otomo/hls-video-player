@@ -76,14 +76,39 @@ def mount_static(app: FastAPI, *, static_dir: str | None = None) -> None:
     static_dir 省略時は `app/static/` を自動使用 (pipx インストール時に
     パッケージと一緒にコピーされるため pyproject.toml 配下で確実に存在)。
 
+    後方互換: 旧 notebook が `static_dir='<repo>/static'` を渡してきても、
+    そこに存在しなければ `<repo>/app/static/` または同梱の `_PACKAGE_STATIC_DIR`
+    に自動でフォールバックする (commit d45e0b7 で static/ を app/ 内に移したため)。
+
     `/library/*` は player_embed.router 側で動的ルートとして登録するため、
     ここではマウントしない。
     """
-    path = Path(static_dir) if static_dir else _PACKAGE_STATIC_DIR
+    path: Path | None = None
+    if static_dir:
+        candidate = Path(static_dir)
+        if candidate.is_dir():
+            path = candidate
+        else:
+            # 旧 notebook 互換: <repo>/static が無ければ <repo>/app/static を試す
+            new_loc = candidate.parent / "app" / "static"
+            if new_loc.is_dir():
+                import logging
+                logging.getLogger(__name__).info(
+                    "static_dir=%s が見つからないため %s にフォールバック "
+                    "(古い notebook を使っていませんか?)",
+                    candidate, new_loc,
+                )
+                path = new_loc
+    if path is None:
+        path = _PACKAGE_STATIC_DIR
+
     if not path.is_dir():
         raise RuntimeError(
             f"static directory not found: {path}\n"
-            "pipx で再インストールしてください: pipx install --force \"<repo>[gui,app]\""
+            "原因として考えられるもの:\n"
+            "  1. notebook が古い (cell 6 / 13 で `mount_static(fapi)` を引数なしで呼ぶ最新版を使ってください)\n"
+            "  2. pipx 再インストール: pipx install --force \"<repo>[gui,app]\"\n"
+            "  3. リポジトリの再 clone: cd /content/hls-video-player && git pull"
         )
     app.mount("/static", StaticFiles(directory=str(path)), name="static")
 
