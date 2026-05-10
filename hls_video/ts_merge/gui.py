@@ -53,8 +53,8 @@ _GRID_CARD_W = 240
 _GRID_CARD_H = int(_GRID_CARD_W * 9 / 16)   # 135
 _GRID_THUMB_W = 220
 _GRID_THUMB_H = int(_GRID_THUMB_W * 9 / 16)  # 123 (ceil 124)
-# カード全体の高さ: サムネ + タイトル(28) + 長さ(20) + ボタン行(40) + padding
-_GRID_CARD_FULL_H = _GRID_THUMB_H + 100
+# カード全体の高さ: サムネ(123) + タイトル(28) + 長さ(20) + ボタン行(46) + padding
+_GRID_CARD_FULL_H = _GRID_THUMB_H + 110
 _GRID_CARD_GAP = 12                         # カード間の余白 (px)
 _GRID_VIEWPORT_BUFFER_ROWS = 2              # ビューポート上下に余分に描画する行数
 _SLIDESHOW_INTERVAL_MS = 700
@@ -862,6 +862,31 @@ class MainApp:
         canvas.bind_all("<MouseWheel>", _on_mousewheel, add="+")
 
     @staticmethod
+    def _make_clickable(label: tk.Label, *, on_click, hover_bg: str, normal_bg: str):
+        """tk.Label をクリックボタン化する: ホバーで背景色変化 + クリックで on_click 実行。
+
+        macOS の tk.Button は bg/fg が無視されるため、Label + bind で代用する。
+        """
+        def _enter(_e):
+            try:
+                label.configure(bg=hover_bg)
+            except tk.TclError:
+                pass
+        def _leave(_e):
+            try:
+                label.configure(bg=normal_bg)
+            except tk.TclError:
+                pass
+        def _click(_e):
+            try:
+                on_click()
+            except Exception as exc:  # noqa: BLE001
+                debug(f"clickable label callback failed: {exc}")
+        label.bind("<Enter>", _enter)
+        label.bind("<Leave>", _leave)
+        label.bind("<Button-1>", _click)
+
+    @staticmethod
     def _format_duration(s: float) -> str:
         """秒を H:MM:SS / M:SS 形式へ整形 (Web /play と同じ)。"""
         try:
@@ -917,9 +942,16 @@ class MainApp:
                 btn = card.get("fav_btn")
                 if btn:
                     btn.configure(
-                        text=("★" if is_fav else "☆"),
-                        bg=("#2a2620" if is_fav else "#1a1d24"),
-                        fg=("#ffc857" if is_fav else "#888"),
+                        text=("★ お気に入り済" if is_fav else "☆ お気に入り"),
+                        bg=("#3d3320" if is_fav else "#2a2f3a"),
+                        fg=("#ffd667" if is_fav else "#c8d0dc"),
+                    )
+                    # hover 戻り色も更新
+                    self._make_clickable(
+                        btn,
+                        on_click=lambda u=uuid: self._toggle_grid_fav(u),
+                        hover_bg=("#4a3f28" if is_fav else "#3a4250"),
+                        normal_bg=("#3d3320" if is_fav else "#2a2f3a"),
                     )
             except tk.TclError:
                 pass
@@ -1138,33 +1170,48 @@ class MainApp:
         )
         duration_label.pack(fill=tk.X, padx=6, pady=(2, 0))
 
-        # ボタン行 (大きめ)
+        # ボタン行 — macOS の tk.Button は bg を無視するので Label をボタン化する
         btn_row = tk.Frame(card, bg="#1a1d24")
-        btn_row.pack(fill=tk.X, padx=4, pady=(4, 4))
+        btn_row.pack(fill=tk.X, padx=6, pady=(6, 6))
 
         is_fav = uuid in self._favorites_set
-        fav_btn = tk.Button(
-            btn_row, text=("★" if is_fav else "☆"),
-            bg=("#2a2620" if is_fav else "#272c36"),
-            fg=("#ffc857" if is_fav else "#aaa"),
-            activebackground="#3a3a40",
-            relief="flat", borderwidth=0, cursor="hand2",
-            font=("", 18, "bold"),
-            padx=10, pady=2,
-            command=lambda u=uuid: self._toggle_grid_fav(u),
+
+        # ★ お気に入りボタン (Label を hand cursor + click 連動)
+        fav_btn = tk.Label(
+            btn_row,
+            text=("★ お気に入り済" if is_fav else "☆ お気に入り"),
+            bg=("#3d3320" if is_fav else "#2a2f3a"),
+            fg=("#ffd667" if is_fav else "#c8d0dc"),
+            font=("Helvetica", 11, "bold"),
+            padx=10, pady=6,
+            cursor="hand2",
+            relief="flat", borderwidth=0,
         )
         fav_btn.pack(side=tk.LEFT)
+        self._make_clickable(
+            fav_btn,
+            on_click=lambda u=uuid: self._toggle_grid_fav(u),
+            hover_bg=("#4a3f28" if is_fav else "#3a4250"),
+            normal_bg=("#3d3320" if is_fav else "#2a2f3a"),
+        )
 
-        play_btn = tk.Button(
-            btn_row, text="▶ 再生",
-            bg="#0d3a5c", fg="#ffffff",
-            activebackground="#155a8a", activeforeground="#ffffff",
-            relief="flat", borderwidth=0, cursor="hand2",
-            font=("", 12, "bold"),
-            padx=14, pady=4,
-            command=lambda u=uuid: self._play_uuid(u),
+        # ▶ 再生ボタン (大きく目立つ青のアクションボタン)
+        play_btn = tk.Label(
+            btn_row,
+            text="▶ 再生",
+            bg="#1976d2", fg="#ffffff",
+            font=("Helvetica", 12, "bold"),
+            padx=18, pady=6,
+            cursor="hand2",
+            relief="flat", borderwidth=0,
         )
         play_btn.pack(side=tk.RIGHT)
+        self._make_clickable(
+            play_btn,
+            on_click=lambda u=uuid: self._play_uuid(u),
+            hover_bg="#2196f3",
+            normal_bg="#1976d2",
+        )
 
         # サムネクリックで再生
         def _on_thumb_click(e, u=uuid):
@@ -1410,9 +1457,16 @@ class MainApp:
             btn = card["fav_btn"]
             try:
                 btn.configure(
-                    text=("★" if new_state else "☆"),
-                    bg=("#2a2620" if new_state else "#1a1d24"),
-                    fg=("#ffc857" if new_state else "#888"),
+                    text=("★ お気に入り済" if new_state else "☆ お気に入り"),
+                    bg=("#3d3320" if new_state else "#2a2f3a"),
+                    fg=("#ffd667" if new_state else "#c8d0dc"),
+                )
+                # hover 時の戻り色も更新するため、再 bind
+                self._make_clickable(
+                    btn,
+                    on_click=lambda u=uuid: self._toggle_grid_fav(u),
+                    hover_bg=("#4a3f28" if new_state else "#3a4250"),
+                    normal_bg=("#3d3320" if new_state else "#2a2f3a"),
                 )
             except tk.TclError:
                 pass
