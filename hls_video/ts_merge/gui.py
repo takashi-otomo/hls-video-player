@@ -49,13 +49,13 @@ from hls_video import favorites as _favorites
 from hls_video.thumbnail_generator import THUMB_PERCENTS, thumb_filename
 
 # グリッドカード寸法 (Web /play と同じ 16:9)
-_GRID_CARD_W = 220
-_GRID_CARD_H = int(_GRID_CARD_W * 9 / 16)   # 123.75 → 123
-_GRID_THUMB_W = 200
-_GRID_THUMB_H = int(_GRID_THUMB_W * 9 / 16)  # 112.5 → 112
-# カード全体の高さ: サムネ + タイトル (~20px) + ボタン行 (~26px) + padding
-_GRID_CARD_FULL_H = _GRID_THUMB_H + 60
-_GRID_CARD_GAP = 10                         # カード間の余白 (px)
+_GRID_CARD_W = 240
+_GRID_CARD_H = int(_GRID_CARD_W * 9 / 16)   # 135
+_GRID_THUMB_W = 220
+_GRID_THUMB_H = int(_GRID_THUMB_W * 9 / 16)  # 123 (ceil 124)
+# カード全体の高さ: サムネ + タイトル(28) + 長さ(20) + ボタン行(40) + padding
+_GRID_CARD_FULL_H = _GRID_THUMB_H + 100
+_GRID_CARD_GAP = 12                         # カード間の余白 (px)
 _GRID_VIEWPORT_BUFFER_ROWS = 2              # ビューポート上下に余分に描画する行数
 _SLIDESHOW_INTERVAL_MS = 700
 
@@ -516,8 +516,10 @@ class MainApp:
 
         # サムネキャッシュ (PhotoImage は GC されないよう参照を保持する必要がある)
         self._thumb_cache: dict[str, "ImageTk.PhotoImage"] = {}        # list view 80x45
-        self._poster_cache: dict[str, "ImageTk.PhotoImage"] = {}       # grid 200x112 poster
+        self._poster_cache: dict[str, "ImageTk.PhotoImage"] = {}       # grid 220x123 poster
         self._slideshow_cache: dict[str, list] = {}                    # grid hover 用 6 枚
+        # 動画メタ (duration, source_filename 等) — 表示用のキャッシュ
+        self._meta_cache: dict[str, dict] = {}
 
         # スキャン中だけ更新する読み取り専用キャッシュ (毎エントリの stat 回数削減)
         self._converted_dirs: set[str] = set()    # converted/<stem>/ が存在する stem
@@ -859,6 +861,21 @@ class MainApp:
             canvas.yview_scroll(int(-e.delta / 3), "units")
         canvas.bind_all("<MouseWheel>", _on_mousewheel, add="+")
 
+    @staticmethod
+    def _format_duration(s: float) -> str:
+        """秒を H:MM:SS / M:SS 形式へ整形 (Web /play と同じ)。"""
+        try:
+            s = max(0, int(float(s) or 0))
+        except (TypeError, ValueError):
+            return "—"
+        if s <= 0:
+            return "—"
+        h, rem = divmod(s, 3600)
+        m, sec = divmod(rem, 60)
+        if h:
+            return f"{h}:{m:02d}:{sec:02d}"
+        return f"{m}:{sec:02d}"
+
     def _refresh_favorites_set(self):
         """favorites.json を読み直してメモリにキャッシュ (同期、Drive FUSE で遅い可能性あり)。"""
         try:
@@ -1096,52 +1113,58 @@ class MainApp:
         card.place(x=x, y=y, width=_GRID_CARD_W, height=_GRID_CARD_FULL_H)
 
         # サムネ Label (16:9 placeholder)
-        thumb = tk.Label(
-            card, bg="#0a0c10",
-            width=_GRID_THUMB_W, height=_GRID_THUMB_H,
-            cursor="hand2",
-        )
-        # Tk Label の width/height は文字単位なのでピクセルで固定するため
-        # 空の PhotoImage で寸法を確保 (compound 不要)
+        thumb = tk.Label(card, bg="#0a0c10", cursor="hand2")
         try:
             placeholder = tk.PhotoImage(width=_GRID_THUMB_W, height=_GRID_THUMB_H)
             thumb.configure(image=placeholder, width=_GRID_THUMB_W, height=_GRID_THUMB_H)
             thumb._placeholder_ref = placeholder  # GC 防止
         except tk.TclError:
             pass
-        thumb.pack()
+        thumb.pack(pady=(2, 4))
 
-        # タイトル (uuid を縮めて表示)
-        title_text = uuid[:36] + ("…" if len(uuid) > 36 else "")
+        # タイトル (uuid を縮めて表示) — meta 読込後に source_filename へ差替え
+        title_text = uuid[:38] + ("…" if len(uuid) > 38 else "")
         title_label = tk.Label(
             card, text=title_text, bg="#1a1d24", fg="#e6e8eb",
             font=("Menlo", 9), wraplength=_GRID_THUMB_W,
             justify="left", anchor="w",
         )
-        title_label.pack(fill=tk.X, padx=4, pady=(2, 0))
+        title_label.pack(fill=tk.X, padx=6)
 
-        # ボタン行
+        # 動画長 (左寄せ、メタ読込後に更新)
+        duration_label = tk.Label(
+            card, text="⏱ —", bg="#1a1d24", fg="#8b93a1",
+            font=("", 10), anchor="w",
+        )
+        duration_label.pack(fill=tk.X, padx=6, pady=(2, 0))
+
+        # ボタン行 (大きめ)
         btn_row = tk.Frame(card, bg="#1a1d24")
-        btn_row.pack(fill=tk.X, pady=(2, 2))
+        btn_row.pack(fill=tk.X, padx=4, pady=(4, 4))
 
         is_fav = uuid in self._favorites_set
         fav_btn = tk.Button(
             btn_row, text=("★" if is_fav else "☆"),
-            bg=("#2a2620" if is_fav else "#1a1d24"),
-            fg=("#ffc857" if is_fav else "#888"),
+            bg=("#2a2620" if is_fav else "#272c36"),
+            fg=("#ffc857" if is_fav else "#aaa"),
+            activebackground="#3a3a40",
             relief="flat", borderwidth=0, cursor="hand2",
-            font=("", 12),
+            font=("", 18, "bold"),
+            padx=10, pady=2,
             command=lambda u=uuid: self._toggle_grid_fav(u),
         )
-        fav_btn.pack(side=tk.LEFT, padx=(4, 2))
+        fav_btn.pack(side=tk.LEFT)
 
         play_btn = tk.Button(
-            btn_row, text="▶ 再生", bg="#1a1d24", fg="#4aa8ff",
+            btn_row, text="▶ 再生",
+            bg="#0d3a5c", fg="#ffffff",
+            activebackground="#155a8a", activeforeground="#ffffff",
             relief="flat", borderwidth=0, cursor="hand2",
-            font=("", 10),
+            font=("", 12, "bold"),
+            padx=14, pady=4,
             command=lambda u=uuid: self._play_uuid(u),
         )
-        play_btn.pack(side=tk.RIGHT, padx=(2, 4))
+        play_btn.pack(side=tk.RIGHT)
 
         # サムネクリックで再生
         def _on_thumb_click(e, u=uuid):
@@ -1154,11 +1177,18 @@ class MainApp:
 
         self._grid_cards[uuid] = {
             "frame": card, "thumb": thumb,
+            "title_label": title_label,
+            "duration_label": duration_label,
             "fav_btn": fav_btn, "play_btn": play_btn,
             "slideshow": slideshow_state,
         }
 
-        # poster.png を背景でロード
+        # 既にメタが読み込み済みなら即時反映
+        meta = self._meta_cache.get(uuid)
+        if meta:
+            self._apply_meta_to_card(uuid, meta)
+
+        # poster.png + meta.json を背景でロード
         self._enqueue_poster_load(uuid)
 
     def _bind_card_hover(self, thumb_label, uuid: str, state: dict):
@@ -1206,7 +1236,7 @@ class MainApp:
             state["after_id"] = None
 
     def _ensure_poster_workers(self, n: int = 4):
-        """サムネ用 worker thread を最大 n 個起動 (起動済みなら何もしない)。
+        """サムネ + メタ用 worker thread を最大 n 個起動 (起動済みなら何もしない)。
         各 worker は self._poster_queue から uuid を取り出して順次処理する。"""
         if self._poster_workers_started:
             return
@@ -1220,34 +1250,70 @@ class MainApp:
                     return
                 if uuid is None:
                     return
-                if uuid in self._poster_cache:
-                    self._poster_queue.task_done()
-                    continue
                 out_dir = output_dir_for(uuid, Path(self.folder))
-                poster = out_dir / "thumbs" / "poster.png"
-                # poster が無ければ thumb_50 を fallback (どちらも .is_file() で 1 stat)
-                if poster.is_file():
-                    src = poster
-                else:
-                    fallback = out_dir / "thumbs" / thumb_filename(50)
-                    src = fallback if fallback.is_file() else None
-                if src is None:
-                    self._poster_queue.task_done()
-                    continue
-                try:
-                    img = Image.open(src)
-                    img.thumbnail((_GRID_THUMB_W, _GRID_THUMB_H), Image.LANCZOS)
-                    self.root.after(
-                        0, lambda i=img, u=uuid: self._on_poster_loaded(u, i),
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    debug(f"poster load failed {uuid}: {exc}")
+
+                # 1) meta.json をまず読む (動画長表示に使用)
+                if uuid not in self._meta_cache:
+                    meta_path = out_dir / "meta.json"
+                    try:
+                        if meta_path.is_file():
+                            meta = json.loads(meta_path.read_text() or "{}")
+                            if isinstance(meta, dict):
+                                self.root.after(
+                                    0, lambda u=uuid, m=meta: self._on_meta_loaded(u, m),
+                                )
+                    except Exception as exc:  # noqa: BLE001
+                        debug(f"meta load failed {uuid}: {exc}")
+
+                # 2) poster.png (なければ thumb_50.jpg) を読み込み
+                if uuid not in self._poster_cache:
+                    poster = out_dir / "thumbs" / "poster.png"
+                    if poster.is_file():
+                        src = poster
+                    else:
+                        fallback = out_dir / "thumbs" / thumb_filename(50)
+                        src = fallback if fallback.is_file() else None
+                    if src is not None:
+                        try:
+                            img = Image.open(src)
+                            img.thumbnail((_GRID_THUMB_W, _GRID_THUMB_H), Image.LANCZOS)
+                            self.root.after(
+                                0, lambda i=img, u=uuid: self._on_poster_loaded(u, i),
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            debug(f"poster load failed {uuid}: {exc}")
                 self._poster_queue.task_done()
 
         for i in range(n):
             threading.Thread(
                 target=_worker_loop, name=f"poster-w{i}", daemon=True,
             ).start()
+
+    def _on_meta_loaded(self, uuid: str, meta: dict):
+        """meta.json から動画長などを取り出し該当カードに反映 (main thread)。"""
+        self._meta_cache[uuid] = meta
+        self._apply_meta_to_card(uuid, meta)
+
+    def _apply_meta_to_card(self, uuid: str, meta: dict):
+        card = self._grid_cards.get(uuid)
+        if not card:
+            return
+        # 動画長
+        try:
+            dur_label = card.get("duration_label")
+            if dur_label is not None:
+                dur_label.configure(text=f"⏱ {self._format_duration(meta.get('duration', 0))}")
+        except tk.TclError:
+            pass
+        # タイトル: source_filename があれば差し替え
+        try:
+            title_label = card.get("title_label")
+            src_name = meta.get("source_filename")
+            if title_label is not None and src_name:
+                # ファイル名は長くなりがちなので 2 行までで切る
+                title_label.configure(text=src_name)
+        except tk.TclError:
+            pass
 
     def _enqueue_poster_load(self, uuid: str):
         """poster.png のロードを bounded queue に投入 (UI を詰まらせない)。"""
