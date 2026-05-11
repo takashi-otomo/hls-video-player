@@ -601,50 +601,57 @@ class MainApp:
         self.root.geometry(f"{w}x{h}+{x}+{y}")
 
     def _build_ui(self):
-        # ツールバー
-        toolbar = ttk.Frame(self.root, padding=(10, 5))
-        toolbar.pack(fill=tk.X)
-
-        self.status_label = ttk.Label(toolbar, text="スキャン中...")
+        # ===== 1段目: 件数表示 (横一杯) =====
+        status_row = ttk.Frame(self.root, padding=(10, 4))
+        status_row.pack(fill=tk.X)
+        self.status_label = ttk.Label(
+            status_row, text="スキャン中...",
+            font=("", 12),
+        )
         self.status_label.pack(side=tk.LEFT)
-
-        ttk.Button(toolbar, text="再スキャン", command=self._run_scan).pack(
-            side=tk.RIGHT, padx=(5, 0))
-        ttk.Button(toolbar, text="📂 Finder", command=self._open_folder).pack(
-            side=tk.RIGHT, padx=(5, 0))
-
-        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(
-            side=tk.RIGHT, fill=tk.Y, padx=8)
-
-        # プレイヤー関連ボタン
-        self.player_btn = ttk.Button(
-            toolbar, text="🎬 プレイヤー起動", command=self._toggle_player_server)
-        self.player_btn.pack(side=tk.RIGHT, padx=(5, 0))
-        self.play_selected_btn = ttk.Button(
-            toolbar, text="▶ 選択を再生", command=self._play_selected)
-        self.play_selected_btn.pack(side=tk.RIGHT, padx=(5, 0))
-
-        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(
-            side=tk.RIGHT, fill=tk.Y, padx=8)
-
-        ttk.Button(toolbar, text="📋 Colabコマンド", command=self._copy_colab_cmd).pack(
-            side=tk.RIGHT, padx=(5, 0))
-        ttk.Button(toolbar, text="🗑 TSパート削除", command=self._delete_ts_parts).pack(
-            side=tk.RIGHT, padx=(5, 0))
-        ttk.Button(toolbar, text="📝 index削除", command=self._remove_from_index_checked).pack(
-            side=tk.RIGHT, padx=(5, 0))
-
-        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(
-            side=tk.RIGHT, fill=tk.Y, padx=8)
-
-        ttk.Button(toolbar, text="全選択", command=self._select_all).pack(
-            side=tk.RIGHT, padx=(5, 0))
-        ttk.Button(toolbar, text="全解除", command=self._deselect_all).pack(
-            side=tk.RIGHT, padx=(5, 0))
 
         ttk.Separator(self.root).pack(fill=tk.X)
 
-        # フィルターバー
+        # ===== 2段目: ボタン群 =====
+        toolbar = ttk.Frame(self.root, padding=(10, 5))
+        toolbar.pack(fill=tk.X)
+
+        # 左側 (選択操作)
+        ttk.Button(toolbar, text="全選択", command=self._select_all).pack(
+            side=tk.LEFT, padx=(0, 4))
+        ttk.Button(toolbar, text="全解除", command=self._deselect_all).pack(
+            side=tk.LEFT, padx=(0, 4))
+
+        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(
+            side=tk.LEFT, fill=tk.Y, padx=8)
+
+        # 中央 (一覧操作)
+        ttk.Button(toolbar, text="📝 index削除", command=self._remove_from_index_checked).pack(
+            side=tk.LEFT, padx=(0, 4))
+        ttk.Button(toolbar, text="🗑 TSパート削除", command=self._delete_ts_parts).pack(
+            side=tk.LEFT, padx=(0, 4))
+        ttk.Button(toolbar, text="📋 Colabコマンド", command=self._copy_colab_cmd).pack(
+            side=tk.LEFT, padx=(0, 4))
+
+        # 右側 (再生 / プレイヤー / Finder / 再スキャン)
+        ttk.Button(toolbar, text="再スキャン", command=self._run_scan).pack(
+            side=tk.RIGHT, padx=(4, 0))
+        ttk.Button(toolbar, text="📂 Finder", command=self._open_folder).pack(
+            side=tk.RIGHT, padx=(4, 0))
+
+        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(
+            side=tk.RIGHT, fill=tk.Y, padx=8)
+
+        self.player_btn = ttk.Button(
+            toolbar, text="🎬 プレイヤー起動", command=self._toggle_player_server)
+        self.player_btn.pack(side=tk.RIGHT, padx=(4, 0))
+        self.play_selected_btn = ttk.Button(
+            toolbar, text="▶ 選択を再生", command=self._play_selected)
+        self.play_selected_btn.pack(side=tk.RIGHT, padx=(4, 0))
+
+        ttk.Separator(self.root).pack(fill=tk.X)
+
+        # ===== 3段目: フィルター =====
         filter_bar = ttk.Frame(self.root, padding=(10, 3))
         filter_bar.pack(fill=tk.X)
         ttk.Label(filter_bar, text="フィルター:").pack(side=tk.LEFT, padx=(0, 5))
