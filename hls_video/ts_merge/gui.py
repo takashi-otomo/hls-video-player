@@ -543,6 +543,8 @@ class MainApp:
         import queue as _queue
         self._poster_queue: _queue.Queue = _queue.Queue()
         self._poster_workers_started = False
+        # GUI が閉じ始めたら背景スレッドからの root.after 呼び出しを無視するフラグ
+        self._shutting_down = False
 
         debug("Tk() 開始")
         self.root = tk.Tk()
@@ -880,6 +882,17 @@ class MainApp:
         # build 後の widget はそのつど bind する (新規カード生成時のため)
         self._bind_wheel = _on_mousewheel
 
+    def _safe_after(self, ms: int, callback) -> None:
+        """root.after() の安全版: GUI 終了後 (main thread が main loop に居ない時)
+        に背景スレッドから呼ばれても RuntimeError / TclError を握り潰す。"""
+        try:
+            if getattr(self, "_shutting_down", False):
+                return
+            self.root.after(ms, callback)
+        except (RuntimeError, tk.TclError):
+            # main loop が既に終了している (アプリ closing 中)
+            pass
+
     @staticmethod
     def _make_clickable(label: tk.Label, *, on_click, hover_bg: str, normal_bg: str):
         """tk.Label をクリックボタン化する: ホバーで背景色変化 + クリックで on_click 実行。
@@ -940,7 +953,7 @@ class MainApp:
                 debug(f"favorites async load failed: {exc}")
                 favs = set()
             elapsed = (time.perf_counter() - t0) * 1000
-            self.root.after(
+            self._safe_after(
                 0, lambda f=favs, g=gen, e=elapsed:
                 self._on_favorites_loaded(f, g, e),
             )
@@ -1309,7 +1322,7 @@ class MainApp:
             except tk.TclError:
                 return
             state["idx"] = (state["idx"] + 1) % len(frames)
-            state["after_id"] = self.root.after(_SLIDESHOW_INTERVAL_MS, _step)
+            state["after_id"] = self._safe_after(_SLIDESHOW_INTERVAL_MS, _step)
 
         def _stop(_e=None):
             self._cancel_slideshow_step(state)
@@ -1356,7 +1369,7 @@ class MainApp:
                         if meta_path.is_file():
                             meta = json.loads(meta_path.read_text() or "{}")
                             if isinstance(meta, dict):
-                                self.root.after(
+                                self._safe_after(
                                     0, lambda u=uuid, m=meta: self._on_meta_loaded(u, m),
                                 )
                     except Exception as exc:  # noqa: BLE001
@@ -1376,7 +1389,7 @@ class MainApp:
                             tw = getattr(self, "_grid_thumb_w", _GRID_THUMB_W)
                             th = getattr(self, "_grid_thumb_h", _GRID_THUMB_H)
                             img.thumbnail((tw, th), Image.LANCZOS)
-                            self.root.after(
+                            self._safe_after(
                                 0, lambda i=img, u=uuid: self._on_poster_loaded(u, i),
                             )
                         except Exception as exc:  # noqa: BLE001
@@ -1470,7 +1483,7 @@ class MainApp:
             except Exception as exc:  # noqa: BLE001
                 debug(f"slideshow load failed {uuid}: {exc}")
             if imgs:
-                self.root.after(0, lambda: self._on_slideshow_loaded(uuid, imgs))
+                self._safe_after(0, lambda: self._on_slideshow_loaded(uuid, imgs))
             else:
                 self._slideshow_loading.discard(uuid)
 
@@ -1663,7 +1676,7 @@ class MainApp:
                 dt = time.perf_counter() - t
                 if dt > 0.1:
                     debug(f"scan_entries: [{idx+1}] {uuid[:8]}... {dt:.3f}s (遅い)")
-                self.root.after(0, lambda u=uuid, i=info, n=idx+1: self._update_row(u, i, n))
+                self._safe_after(0, lambda u=uuid, i=info, n=idx+1: self._update_row(u, i, n))
             debug("scan_entries: UUID別スキャン完了")
 
             # index.mdに無いがフォルダにあるTSグループ
@@ -1673,7 +1686,7 @@ class MainApp:
                 if base not in seen:
                     info = self._scan_one_uuid(base, folder_path, all_files, ts_groups, stat_cache)
                     extra_entries.append({"uuid": base, "url": ""})
-                    self.root.after(0, lambda b=base, i=info: self._add_extra_row(b, i))
+                    self._safe_after(0, lambda b=base, i=info: self._add_extra_row(b, i))
 
             # index.mdにもts_groupsにも無い単体TSファイル
             for name in all_files:
@@ -1689,12 +1702,12 @@ class MainApp:
                     continue
                 info = self._scan_one_uuid(base, folder_path, all_files, ts_groups, stat_cache)
                 extra_entries.append({"uuid": base, "url": ""})
-                self.root.after(0, lambda b=base, i=info: self._add_extra_row(b, i))
+                self._safe_after(0, lambda b=base, i=info: self._add_extra_row(b, i))
 
             if extra_entries:
-                self.root.after(0, lambda ee=extra_entries: self._finish_extra(ee))
+                self._safe_after(0, lambda ee=extra_entries: self._finish_extra(ee))
 
-            self.root.after(0, lambda: self._finish_scan())
+            self._safe_after(0, lambda: self._finish_scan())
             debug("scan_entries: 全完了")
 
         threading.Thread(target=scan_entries, daemon=True).start()
@@ -1859,7 +1872,7 @@ class MainApp:
                 debug(f"index load worker エラー: {exc}")
                 completed = set()
             elapsed_ms = (time.perf_counter() - t0) * 1000
-            self.root.after(
+            self._safe_after(
                 0,
                 lambda c=completed, p=present, g=gen, e=elapsed_ms:
                     self._on_index_loaded(c, p, g, e),
@@ -1958,7 +1971,7 @@ class MainApp:
                 img = Image.open(src)
                 img.thumbnail((80, 45), Image.LANCZOS)
                 # ImageTk.PhotoImage は Tcl の操作が入るので main thread で
-                self.root.after(0, lambda i=img, u=uuid, g=gen: self._apply_thumb(u, i, g))
+                self._safe_after(0, lambda i=img, u=uuid, g=gen: self._apply_thumb(u, i, g))
             except Exception as exc:  # noqa: BLE001
                 debug(f"thumb worker failed {uuid}: {exc}")
 
@@ -2182,7 +2195,7 @@ class MainApp:
             if self._scan_generation != gen:
                 return
             entries = [{"uuid": b, "url": ""} for b in sorted(groups)]
-            self.root.after(0, lambda: self._on_full_scan_done(entries, groups, old_checks))
+            self._safe_after(0, lambda: self._on_full_scan_done(entries, groups, old_checks))
 
         threading.Thread(target=scan, daemon=True).start()
 
@@ -2718,10 +2731,10 @@ class MainApp:
                 debug(f"player server crashed: {exc}")
             finally:
                 self._player_running = False
-                self.root.after(0, self._refresh_player_btn)
+                self._safe_after(0, self._refresh_player_btn)
                 # 起動後にクラッシュした場合は messagebox で通知
                 if crash_info and crash_info.get("notify"):
-                    self.root.after(
+                    self._safe_after(
                         0,
                         lambda c=dict(crash_info): self._show_player_crash(c),
                     )
@@ -2786,7 +2799,7 @@ class MainApp:
             return
         self._player_server.should_exit = True
         self._log("🎬 プレイヤー停止要求")
-        self.root.after(500, self._refresh_player_btn)
+        self._safe_after(500, self._refresh_player_btn)
 
     def _refresh_player_btn(self):
         if self._player_running:
@@ -2957,7 +2970,7 @@ class MainApp:
 
     def trigger_rescan_from_api(self):
         """API用: メインスレッドで再スキャンをスケジュール。"""
-        self.root.after(0, self._run_scan)
+        self._safe_after(0, self._run_scan)
 
     def add_urls_from_api(self, urls: list) -> dict:
         """API用: URL群をindex.mdに追加 (重複は自動スキップ)。"""
@@ -2973,10 +2986,10 @@ class MainApp:
                     "message": "no valid urls"}
         added, skipped = add_to_index(self.folder, valid, self.index_file)
         # ログとスキャンはメインスレッドで実行
-        self.root.after(0, lambda: self._log(
+        self._safe_after(0, lambda: self._log(
             f"📝 API経由で {added}件追加, {skipped}件重複, {invalid}件無効"))
         if added > 0:
-            self.root.after(0, self._run_scan)
+            self._safe_after(0, self._run_scan)
         return {"ok": True, "added": added, "skipped": skipped, "invalid": invalid}
 
     # ─── メインループ ───
@@ -2986,6 +2999,8 @@ class MainApp:
         self.root.mainloop()
 
     def _on_close(self):
+        # まず shutdown フラグを立て、背景スレッドの root.after 呼び出しを抑止する
+        self._shutting_down = True
         if self._api_server is not None:
             try:
                 self._api_server.shutdown()
@@ -2997,7 +3012,10 @@ class MainApp:
                 self._player_server.should_exit = True
             except Exception:
                 pass
-        self.root.destroy()
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
 
 
 def run_gui(
