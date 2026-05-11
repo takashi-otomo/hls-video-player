@@ -103,15 +103,30 @@ def load_index(folder: str, index_file: str | None = None) -> list[dict]:
     """index.md を読み込み、URLとUUIDのリストを返す（順序保持）。
 
     index_file: 絶対パスまたはfolderからの相対パス。Noneならfolder/index.md。
+    OSError (errno 89 ECANCELED など Drive FUSE の同期エラー) はキャッチして
+    空リストを返す。GUI の起動を止めないため。
     """
     index_path = resolve_index_path(folder, index_file)
     debug(f"load_index: path={index_path}")
-    if not index_path.exists():
-        debug(f"load_index: ファイルなし")
+    try:
+        if not index_path.exists():
+            debug(f"load_index: ファイルなし")
+            return []
+    except OSError as exc:
+        debug(f"load_index: exists() でエラー: {exc} → 空扱い")
+        return []
+
+    try:
+        text = index_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        debug(f"load_index: read_text でエラー: {exc} → 空扱い")
+        return []
+    except UnicodeDecodeError as exc:
+        debug(f"load_index: decode エラー: {exc} → 空扱い")
         return []
 
     entries = []
-    for line in index_path.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         m = PAT_INDEX_URL.search(line)
         if m:
             uuid = m.group(1)
@@ -557,8 +572,28 @@ class MainApp:
         self._start_api_server()
         if self._start_player_on_boot:
             self._start_player_server()
+        # _run_scan を Tk mainloop 起動後に遅延実行する。これで I/O が遅い /
+        # 失敗してもウィンドウは先に表示される。
+        debug("_run_scan を after で予約")
+        self.root.after(50, self._safe_run_scan)
+
+    def _safe_run_scan(self):
+        """初回スキャンの safe wrapper: 例外が出ても GUI を落とさない。"""
         debug("_run_scan 開始")
-        self._run_scan()
+        try:
+            self._run_scan()
+        except Exception as exc:  # noqa: BLE001
+            import traceback
+            tb = traceback.format_exc()
+            debug(f"_run_scan failed: {exc}\n{tb}")
+            try:
+                self.status_label.config(
+                    text=f"スキャン失敗: {type(exc).__name__}: {str(exc)[:80]}"
+                )
+                self._log(f"❌ スキャン失敗: {exc}")
+                self._log("「再スキャン」ボタンで再試行できます")
+            except tk.TclError:
+                pass
 
     def _center_window(self, w: int, h: int):
         x = (self.root.winfo_screenwidth() - w) // 2
