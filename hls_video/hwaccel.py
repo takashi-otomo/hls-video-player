@@ -129,6 +129,40 @@ def _list_decoders(ffmpeg_path: str = "ffmpeg") -> str:
         return ""
 
 
+@functools.lru_cache(maxsize=8)
+def _filter_help(filter_name: str, ffmpeg_path: str = "ffmpeg") -> str:
+    """`ffmpeg -h filter=<name>` のテキスト出力（キャッシュ付き）。"""
+    try:
+        return subprocess.check_output(
+            [ffmpeg_path, "-hide_banner", "-h", f"filter={filter_name}"],
+            stderr=subprocess.STDOUT, timeout=10,
+        ).decode(errors="ignore")
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        logger.warning("filter help failed (%s %s): %s", ffmpeg_path, filter_name, e)
+        return ""
+
+
+@functools.lru_cache(maxsize=8)
+def scale_cuda_supports_format(ffmpeg_path: str = "ffmpeg") -> bool:
+    """この ffmpeg の `scale_cuda` が `format` オプションを持つか。
+
+    `format` オプションは新しめの ffmpeg (5.x 系の一部以降) でのみ
+    サポートされる。Ubuntu 22.04 同梱の ffmpeg 4.4.2 等では未対応で、
+    `scale_cuda=...:format=yuv420p` を渡すと
+    `Option 'format' not found` でフィルタ初期化に失敗し、
+    NVENC パス全体が落ちて CPU フォールバックしてしまう。
+    対応している場合のみ suffix を付与するために判定する。
+    """
+    import re
+
+    help_text = _filter_help("scale_cuda", ffmpeg_path)
+    if not help_text:
+        # help が取れない場合は安全側 = 付けない (未対応扱い)
+        return False
+    # AVOptions 一覧に "  format  <...>" 行があるか
+    return bool(re.search(r"(?m)^\s+format\s", help_text))
+
+
 def detect_cuvid(input_codec: str, ffmpeg_path: str = "ffmpeg") -> Optional[str]:
     """input 側 codec_name に対応する cuvid decoder 名を返す。無ければ None。
 

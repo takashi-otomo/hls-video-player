@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import logging
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -170,17 +172,35 @@ def generate_thumbnails(
     if duration <= 0:
         raise RuntimeError(f"could not determine duration: {input_path}")
 
-    thumb_paths: list[Path] = []
-    for pct in THUMB_PERCENTS:
-        ts = duration * (pct / 100.0)
-        # 動画末尾を超えないようマージン (50ms)
-        ts = min(ts, max(0.0, duration - 0.05))
-        out_path = out / thumb_filename(pct)
-        _extract_one_thumb(input_path=input_path, timestamp=ts, output_path=out_path)
-        thumb_paths.append(out_path)
+    # Google Drive FUSE 上 (Colab の /content/drive 等) では、ある ffmpeg が
+    # 書いた thumb_*.jpg が直後に別 ffmpeg(poster 合成) から見えず
+    # `No such file or directory` で失敗することがある (書込→即読込の
+    # 反映遅延)。サムネ抽出と poster 合成はすべてローカル一時ディレクトリ
+    # で完結させ、最後に成果物だけを出力先へ move する。
+    with tempfile.TemporaryDirectory(prefix="hls-thumbs-") as tmpdir:
+        tmp = Path(tmpdir)
+        tmp_thumbs: list[Path] = []
+        for pct in THUMB_PERCENTS:
+            ts = duration * (pct / 100.0)
+            # 動画末尾を超えないようマージン (50ms)
+            ts = min(ts, max(0.0, duration - 0.05))
+            tmp_path = tmp / thumb_filename(pct)
+            _extract_one_thumb(
+                input_path=input_path, timestamp=ts, output_path=tmp_path
+            )
+            tmp_thumbs.append(tmp_path)
 
-    poster_path = out / "poster.png"
-    _build_poster(thumb_paths, poster_path)
+        tmp_poster = tmp / "poster.png"
+        _build_poster(tmp_thumbs, tmp_poster)
+
+        # 成果物を出力先へ移動 (ローカル→Drive の単純コピーなので競合しない)
+        thumb_paths: list[Path] = []
+        for pct, tp in zip(THUMB_PERCENTS, tmp_thumbs):
+            dst = out / thumb_filename(pct)
+            shutil.move(str(tp), str(dst))
+            thumb_paths.append(dst)
+        poster_path = out / "poster.png"
+        shutil.move(str(tmp_poster), str(poster_path))
 
     logger.info(
         "thumbnails: %d frames + poster generated for %s (duration=%.1fs)",

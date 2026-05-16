@@ -34,7 +34,7 @@ from hls_video.config import (
 from hls_video.ffmpeg_runner import run_ffmpeg
 from hls_video.hwaccel import (
     Backend, _list_decoders, detect_cuda_runtime, detect_nvenc,
-    resolve_cuvid, resolve_hwaccel,
+    resolve_cuvid, resolve_hwaccel, scale_cuda_supports_format,
 )
 from hls_video.master_playlist import build_master_playlist
 from hls_video.progress_parser import create_progress_parser
@@ -126,12 +126,15 @@ def _filter_complex_split(
     - `portrait=True`: 縦動画向けに w/h を入れ替え、variant.height を短辺扱い
     - `scale_filter`: `scale` (CPU) か `scale_cuda` (CUVID decode 時)。
       scale_cuda は GPU メモリ上で解像度変換するので decode → scale → encode まで
-      GPU に常駐し、メモリコピーが一切発生しない。ffmpeg 4.4 以降は
-      `force_original_aspect_ratio` / `force_divisible_by` / `format` オプション対応。
+      GPU に常駐し、メモリコピーが一切発生しない。
 
-      **scale_cuda は `:format=yuv420p` を明示しないと下流の NVENC との
-      pixel format negotiation に失敗して `Impossible to convert between
-      the formats` で落ちる**（ffmpeg 4.4.x の既知挙動）。
+      `scale_cuda` の `format` オプションは新しめの ffmpeg でのみ対応。
+      Ubuntu 22.04 同梱の ffmpeg 4.4.2 等では **未対応** で、
+      `:format=yuv420p` を付けると `Option 'format' not found` で
+      フィルタ初期化に失敗し NVENC パス全体が落ちて CPU に
+      フォールバックしてしまう。よって **実際に対応している場合のみ**
+      付与する (未対応ビルドでは CUVID 出力の nv12 がそのまま
+      h264_nvenc に渡り問題なく動く)。
     """
     n = len(variants)
     labels = "".join(f"[v{i}]" for i in range(n))
@@ -139,8 +142,13 @@ def _filter_complex_split(
         parts = [f"[0:v]yadif=mode=1,split={n}{labels}"]
     else:
         parts = [f"[0:v]split={n}{labels}"]
-    # scale_cuda のときだけ出力フォーマットを明示（NVENC は yuv420p を要求）
-    fmt_suffix = ":format=yuv420p" if scale_filter == "scale_cuda" else ""
+    # scale_cuda かつ この ffmpeg が format オプション対応のときだけ付与
+    fmt_suffix = (
+        ":format=yuv420p"
+        if scale_filter == "scale_cuda"
+        and scale_cuda_supports_format(ffmpeg_path())
+        else ""
+    )
     for i, v in enumerate(variants):
         short_edge = v["height"]
         if portrait:

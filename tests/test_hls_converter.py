@@ -201,15 +201,29 @@ class TestBuildFfmpegArgsNVENCWithCuvid:
         kw.update(overrides)
         return build_ffmpeg_args(**kw)
 
-    def test_scale_cuda_has_format_yuv420p(self):
-        """scale_cuda に :format=yuv420p が必ず付く (NVENC negotiation 失敗対策)。"""
+    def test_scale_cuda_format_when_supported(self, monkeypatch):
+        """scale_cuda が format オプション対応なら :format=yuv420p を付ける。"""
+        import hls_video.hls_converter as mod
+
+        monkeypatch.setattr(mod, "scale_cuda_supports_format", lambda *_a, **_k: True)
         args = self._args()
         fc = args[args.index("-filter_complex") + 1]
-        # 各 variant の scale_cuda 行に format=yuv420p が入っている
-        for v in DEFAULT_VARIANTS:
-            assert f"format=yuv420p" in fc
-        # scale_cuda を使う数だけ format=yuv420p が出る
         assert fc.count("format=yuv420p") == len(DEFAULT_VARIANTS)
+
+    def test_scale_cuda_no_format_when_unsupported(self, monkeypatch):
+        """対応しない ffmpeg (4.4.2 等) では付けない。
+
+        付けると `Option 'format' not found` でフィルタ初期化に失敗し
+        NVENC パスが丸ごと落ちて CPU フォールバックしてしまうため。
+        """
+        import hls_video.hls_converter as mod
+
+        monkeypatch.setattr(mod, "scale_cuda_supports_format", lambda *_a, **_k: False)
+        args = self._args()
+        fc = args[args.index("-filter_complex") + 1]
+        assert "format=yuv420p" not in fc
+        # scale_cuda 自体は使われている
+        assert fc.count("scale_cuda=") == len(DEFAULT_VARIANTS)
 
     def test_cpu_scale_has_no_format_suffix(self):
         """CPU scale には format=yuv420p を付けない (不要 + 下位互換)。"""

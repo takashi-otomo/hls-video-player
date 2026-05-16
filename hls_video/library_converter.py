@@ -39,6 +39,34 @@ VIDEO_EXTS: frozenset[str] = frozenset({".mp4", ".mov", ".mkv", ".webm", ".m4v"}
 # 変換中マーカー: 開始時に作成、正常終了時のみ削除
 CONVERTING_MARKER = ".converting"
 
+# 恒久失敗マーカー: 復元不能な破損ソース等。次回以降スキップする
+# (元ファイルが差し替わったら自動で再挑戦する)
+FAILED_MARKER = ".failed"
+
+# 復元不能な「壊れた入力」を示す ffmpeg/ffprobe エラーの代表パターン。
+# これらは何度やっても成功しないので恒久失敗として扱い、毎回の再試行を止める。
+# (Drive の一時的 read 失敗 = Operation canceled / deadlock 等は含めない)
+_CORRUPT_SOURCE_MARKERS = (
+    "moov atom not found",
+    "Invalid data found when processing input",
+    "error reading header",
+    "Invalid NAL unit size",
+    "could not find corresponding trex",
+    "Format mp4 detected only with low score",
+)
+
+
+def _is_corrupt_source_error(message: str) -> bool:
+    return any(m in message for m in _CORRUPT_SOURCE_MARKERS)
+
+
+def _source_sig(src: Path) -> str:
+    try:
+        st = src.stat()
+        return f"{st.st_size}:{int(st.st_mtime)}"
+    except OSError:
+        return "?"
+
 
 @dataclass
 class ConvertResult:
@@ -205,6 +233,36 @@ def convert_one(
     hls_dir = out_dir / "hls"
     thumbs_dir = out_dir / "thumbs"
     marker = out_dir / CONVERTING_MARKER
+    failed_marker = out_dir / FAILED_MARKER
+
+    # 恒久失敗マーカー: 破損ソースで前回失敗済み。元ファイルが差し替わって
+    # いなければ skip (毎回の無駄な再試行とエラー出力を止める)。
+    if not force and failed_marker.exists():
+        prev = ""
+        try:
+            prev = json.loads(failed_marker.read_text() or "{}").get("source_sig", "")
+        except Exception:
+            prev = ""
+        if prev and prev == _source_sig(src):
+            logger.warning(
+                "skipping %s — previously failed (corrupt source). "
+                "delete %s or use --force to retry",
+                stem, failed_marker,
+            )
+            return ConvertResult(
+                stem=stem,
+                output_dir=out_dir,
+                duration=0.0,
+                hls_master=hls_dir / "master.m3u8",
+                poster=thumbs_dir / "poster.png",
+                thumbs=[thumbs_dir / thumb_filename(p) for p in THUMB_PERCENTS],
+                skipped=True,
+            )
+        # 元ファイルが差し替わった (size/mtime 変化) → 失敗マーカーを消して再挑戦
+        try:
+            failed_marker.unlink()
+        except OSError:
+            pass
 
     if not force and is_already_converted(stem, lib_root, source_path=src):
         return ConvertResult(
@@ -276,8 +334,37 @@ def convert_one(
             backend=hls_result.get("backend", "?"),
             variants=hls_result.get("variants", []),
         )
-    except BaseException:
-        # 失敗 / 中断時はマーカーをそのまま残す → 次回 CLI で再変換対象になる
+    except BaseException as exc:
+        msg = str(exc)
+        if _is_corrupt_source_error(msg):
+            # 復元不能な破損ソース。恒久失敗マーカーを残し、中断マーカーは
+            # 消す → 次回以降は「中断分の再変換」ではなく skip 扱いになる
+            # (毎回 ffmpeg を叩いて同じエラーを出すのを止める)。
+            try:
+                failed_marker.write_text(
+                    json.dumps(
+                        {
+                            "failed_at": datetime.now(tz=timezone.utc).isoformat(),
+                            "source": src.name,
+                            "source_sig": _source_sig(src),
+                            "reason": msg[:300],
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            except OSError:
+                pass
+            try:
+                marker.unlink()
+            except OSError:
+                pass
+            logger.error(
+                "permanent failure for %s (corrupt source); marked %s — "
+                "will be skipped next run",
+                stem, FAILED_MARKER,
+            )
+            raise
+        # それ以外 (一時的失敗/中断) はマーカーを残す → 次回再変換対象
         raise
 
     # 全工程成功 → マーカー削除して「変換済み」状態にする
