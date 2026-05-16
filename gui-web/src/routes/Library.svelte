@@ -1,10 +1,24 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { filteredVideos, videosLoaded } from '../lib/stores';
+  import { api } from '../lib/api';
   import VirtualGrid from '../lib/VirtualGrid.svelte';
   import Card from '../lib/Card.svelte';
   import FilterBar from '../lib/FilterBar.svelte';
 
   let showHelp = false;
+  let readError: string | null = null;
+
+  onMount(async () => {
+    try {
+      const h = await api.health();
+      if (h.file_read && !h.file_read.ok) {
+        readError = h.file_read.reason;
+      }
+    } catch {
+      /* health 取得失敗は無視 */
+    }
+  });
 
   function onKey(e: KeyboardEvent) {
     const t = e.target as HTMLElement;
@@ -24,6 +38,13 @@
 </script>
 
 <svelte:window on:keydown={onKey} />
+
+{#if readError}
+  <div class="read-error-banner">
+    ⚠ ファイル本文の読み込みに失敗しています。サムネ・再生ができません。<br />
+    <small>{readError}</small>
+  </div>
+{/if}
 
 <FilterBar />
 
@@ -105,4 +126,13 @@
     font-family: Menlo, monospace;
     font-size: 0.85em;
   }
+  .read-error-banner {
+    background: #3a1f1f;
+    color: #ffb3b3;
+    border-bottom: 1px solid #6a2c2c;
+    padding: 0.6rem 1rem;
+    font-size: 0.9rem;
+    line-height: 1.5;
+  }
+  .read-error-banner small { color: #d99; }
 </style>

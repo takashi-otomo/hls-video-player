@@ -10,7 +10,13 @@ async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  health: () => jsonFetch<{ ok: boolean; library_root: string }>('/api/health'),
+  health: () =>
+    jsonFetch<{
+      ok: boolean;
+      library_root: string;
+      library_root_exists: boolean;
+      file_read: { ok: boolean; reason: string; sampled_stem: string | null };
+    }>('/api/health'),
 
   videos: () => jsonFetch<Video[]>('/api/videos'),
   video: (id: string) =>

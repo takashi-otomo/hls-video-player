@@ -5,7 +5,7 @@
 COMPOSE := docker compose --env-file .env -f docker/docker-compose.yml
 COMPOSE_DEV := $(COMPOSE) -f docker/docker-compose.dev.yml
 
-.PHONY: help up down build dev logs restart ps config clean
+.PHONY: help up down build dev logs restart ps config clean mirror
 
 help:
 	@echo "make up      — 本番モードで起動 (http://localhost:7860)"
@@ -17,6 +17,8 @@ help:
 	@echo "make ps      — コンテナ状態"
 	@echo "make config  — compose 設定の検証"
 	@echo "make clean   — コンテナ + ボリューム削除"
+	@echo "make mirror  — Drive の LIBRARY_PATH を ./local-library へ rsync"
+	@echo "               (Docker+Drive FUSE の EDEADLK 回避用)"
 
 up:
 	$(COMPOSE) up -d
@@ -44,3 +46,19 @@ config:
 
 clean:
 	$(COMPOSE) down -v
+
+mirror:
+	@set -a; . ./.env; set +a; \
+	test -n "$$LIBRARY_PATH" || (echo "LIBRARY_PATH 未設定"; exit 1); \
+	mkdir -p ./local-library; \
+	echo "rsync: $$LIBRARY_PATH/ → ./local-library/ (converted/ + index.md + favorites.json + *.mp4)"; \
+	rsync -a --info=progress2 \
+	  --include='converted/***' \
+	  --include='index.md' \
+	  --include='favorites.json' \
+	  --include='*.mp4' --include='*.mkv' --include='*.mov' --include='*.webm' \
+	  --exclude='*' \
+	  "$$LIBRARY_PATH/" ./local-library/ ; \
+	echo ""; \
+	echo "完了。 .env を以下に変更して make restart:"; \
+	echo "  LIBRARY_PATH=$$PWD/local-library"

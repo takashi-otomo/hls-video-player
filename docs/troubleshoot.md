@@ -97,16 +97,51 @@ make down                  # 既存コンテナを停止
 
 ## Drive FUSE 固有
 
+### ★ 重要: サムネが全部黒い / 再生できない / リンク切れが大量
+**症状**: `/api/videos` は件数を返すのにサムネが全て黒、HLS も再生不可。
+GUI 上部に「⚠ ファイル本文の読み込みに失敗しています」バナーが出る。
+
+**原因 (確定)**: Google Drive **CloudStorage** フォルダを Docker に
+bind mount すると、**ファイル本文の read が `EDEADLK`
+(Resource deadlock avoided) で deadlock** する。
+Docker Desktop の VirtioFS と Google Drive の FUSE が二重 FUSE になり、
+`stat` (サイズ取得) は通るが `read` (本文) が失敗する macOS 固有の問題。
+リトライしても回復しない。`/api/health` の `file_read.ok` が `false` になる。
+
+**回避策 (いずれか)**:
+
+1. **ローカルフォルダを使う (推奨)**
+   Drive 外のローカル SSD にライブラリを置き、`LIBRARY_PATH` をそこに向ける。
+   既存の Drive ライブラリは `make mirror` でローカルへ複製できる:
+   ```bash
+   # .env の LIBRARY_PATH (Drive) → ローカル ./local-library へ rsync
+   make mirror
+   # .env を local-library に向けて再起動
+   #   LIBRARY_PATH=/Users/<you>/claude/hls-video-player/local-library
+   make restart
+   ```
+   Drive は原本保管庫として残り、Docker はローカルを読むので高速・安定。
+
+2. **Python 版 `ts-merge --gui` を使う (Drive 用)**
+   ホストネイティブで動くため Drive FUSE を正しく読める。
+   Drive 常駐ライブラリの閲覧はこちら、ローカルライブラリは Docker 版、
+   と使い分ける (favorites.json は両者で共有)。
+
+3. **変換出力だけローカルに分離**
+   原本 mp4 は Drive、`converted/` のみローカルへ。
+   Docker は `converted/` を読めれば再生・サムネは動く。
+
+> Docker 版は **ローカルフォルダで全機能が正常動作**することを検証済み
+> (`/tmp/...` のような Drive 外パス)。問題は Drive+Docker の組合せのみ。
+
 ### `OSError: [Errno 89] Operation canceled`
-Drive がファイル同期中の read 失敗。
-- gui コンテナはこれを catch して空扱いで継続 (ハングしない)
-- 数秒待ってリロードすれば解消することが多い
-- Drive アプリでファイルをローカルキャッシュ (ピン留め) すると安定
+Drive がファイル同期中の read 失敗。Python 版で発生。
+- catch して空扱いで継続 (ハングしない)
+- 数秒待ってリロードで解消することが多い
 
 ### 初回アクセスが遅い (数十秒〜数分)
-Drive がファイルをローカルにダウンロードする待ち時間。
-- 一度キャッシュされれば以降は高速
-- 大きなライブラリは事前に Drive アプリで「オフライン利用可」にしておく
+Drive がファイルをローカルにダウンロードする待ち時間 (Python 版)。
+- Docker 版の場合は上記「サムネが全部黒い」を参照 (こちらは遅延でなく不可)
 
 ## クリーンアップ
 
