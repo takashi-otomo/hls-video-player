@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import type { Video } from './types';
   import { favoriteIds } from './stores';
   import { api } from './api';
@@ -10,8 +11,47 @@
   let timer: ReturnType<typeof setInterval> | null = null;
 
   $: seq = [video.posterUrl, ...video.thumbs.map((t) => t.url)];
-  $: src = seq[idx] ?? video.posterUrl;
+  $: base = seq[idx] ?? video.posterUrl;
   $: isFav = $favoriteIds.has(video.id);
+
+  // --- サムネ読み込み状態 ---
+  // 404 (Drive FUSE 未キャッシュ等) でも「リンク切れ」ではなく
+  // ローディング表示にし、裏で再試行する。キャッシュ機構と合わさり、
+  // 一度でも読めればキャッシュに乗って以降は即表示される (自己回復)。
+  let ready = false;
+  let attempt = 0;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastBase = '';
+
+  $: if (base !== lastBase) {
+    lastBase = base;
+    ready = false;
+    attempt = 0;
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+  }
+  // retry 時のみ query を付ける (サーバのキャッシュ鍵は pathname のみなので
+  // 鍵は変わらず、ブラウザの 404 キャッシュだけを回避できる)
+  $: src = attempt > 0 ? `${base}?retry=${attempt}` : base;
+
+  function onImgLoad() {
+    ready = true;
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+  }
+  function onImgError() {
+    if (ready || retryTimer) return;
+    // 1.5s から指数バックオフ (上限 30s) で再試行し続ける
+    const delay = Math.min(30000, 1500 * 2 ** attempt);
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      attempt += 1;
+    }, delay);
+  }
 
   function onEnter() {
     // 先読み
@@ -32,6 +72,11 @@
     }
     idx = 0;
   }
+
+  onDestroy(() => {
+    if (timer) clearInterval(timer);
+    if (retryTimer) clearTimeout(retryTimer);
+  });
 
   async function toggleFav(e: MouseEvent) {
     e.preventDefault();
@@ -69,7 +114,21 @@
   on:mouseleave={onLeave}
 >
   <div class="thumb-wrap">
-    <img src={src} alt={video.title} loading="lazy" draggable="false" />
+    <img
+      src={src}
+      alt={video.title}
+      loading="lazy"
+      draggable="false"
+      class:loaded={ready}
+      on:load={onImgLoad}
+      on:error={onImgError}
+    />
+    {#if !ready}
+      <div class="thumb-loading" aria-label="読み込み中" title="読み込み中…">
+        <div class="shimmer"></div>
+        <div class="spinner"></div>
+      </div>
+    {/if}
     <button
       class="fav-btn"
       class:on={isFav}
@@ -115,6 +174,49 @@
     height: 100%;
     object-fit: cover;
     display: block;
+    opacity: 0;
+    transition: opacity 0.2s;
+  }
+  /* 読めるまでは img を隠す → 壊れた画像アイコンを出さない */
+  .thumb-wrap img.loaded {
+    opacity: 1;
+  }
+  .thumb-loading {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    background: var(--surface-2);
+  }
+  .thumb-loading .shimmer {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      100deg,
+      transparent 30%,
+      rgba(255, 255, 255, 0.06) 50%,
+      transparent 70%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.3s ease-in-out infinite;
+  }
+  @keyframes shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+  .thumb-loading .spinner {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 22px;
+    height: 22px;
+    margin: -11px 0 0 -11px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
   }
   .fav-btn {
     position: absolute;
