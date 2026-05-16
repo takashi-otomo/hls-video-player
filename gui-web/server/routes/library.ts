@@ -27,8 +27,12 @@ const CACHE: Record<string, string> = {
   '.m3u8': 'no-cache',
 };
 
-// ディスクキャッシュ対象 (小さく頻繁にアクセスされるもの)
-const CACHEABLE = new Set(['.png', '.jpg', '.jpeg']);
+// ディスクキャッシュ対象。
+// 画像だけでなく HLS (.m3u8 / .ts / .vtt) も対象にする:
+// 「実ファイルを 1 回読んだらキャッシュへ記録し、次回からキャッシュを読む」
+// を再生経路にも効かせ、Drive FUSE が後で EDEADLK しても再生が継続する。
+// converted/ の出力は不変なので size 増加 (ローカル SSD volume) は許容。
+const CACHEABLE = new Set(['.png', '.jpg', '.jpeg', '.m3u8', '.ts', '.vtt']);
 
 library.get('/*', (c) => {
   const url = new URL(c.req.url);
@@ -46,7 +50,9 @@ library.get('/*', (c) => {
   const ext = dot >= 0 ? target.slice(dot).toLowerCase() : '';
   const mime = MIME[ext] ?? 'application/octet-stream';
 
-  // --- 画像: ディスクキャッシュ + ETag/304 ---
+  // --- 画像 + HLS: ディスクキャッシュ + ETag/304 ---
+  // 実ファイルを読めたら serveCached がキャッシュへ記録し、
+  // 次アクセス以降は元ファイル (Drive) に触れずキャッシュから配信する。
   if (CACHEABLE.has(ext)) {
     const ifNoneMatch = c.req.header('if-none-match') ?? null;
     const result = serveCached(rel, target, ifNoneMatch);
@@ -67,7 +73,7 @@ library.get('/*', (c) => {
     return new Response(result.body, { headers });
   }
 
-  // --- HLS 等: streaming のまま ---
+  // --- それ以外 (想定外の大きいバイナリ等): streaming フォールバック ---
   try {
     if (!statSync(target).isFile()) {
       return c.json({ error: 'not_found' }, 404);
