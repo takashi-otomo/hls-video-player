@@ -1,0 +1,47 @@
+name: hls-video-player
+
+services:
+  gui:
+    build:
+      context: ..
+      dockerfile: docker/gui.Dockerfile
+    container_name: hls-gui
+    ports:
+      - "${PORT:-7860}:7860"
+    volumes:
+      - "${LIBRARY_PATH:?LIBRARY_PATH を .env で設定してください}:/library"
+      - hls-config:/config
+    environment:
+      LIBRARY_ROOT: /library
+      HLS_SETTINGS_FILE: /config/settings.json
+      PORT: 7860
+      NODE_ENV: production
+    networks:
+      - hls-net
+    restart: unless-stopped
+    depends_on:
+      - converter
+
+  converter:
+    build:
+      context: ..
+      dockerfile: docker/converter.Dockerfile
+    container_name: hls-converter
+    volumes:
+      - "${LIBRARY_PATH:?LIBRARY_PATH を .env で設定してください}:/library"
+    environment:
+      LIBRARY_ROOT: /library
+      FFMPEG_HWACCEL: cpu
+      FFMPEG_PRESET: ultrafast
+      FFMPEG_AUDIO_COPY: "1"
+      FFMPEG_VARIANTS: "720p,360p"
+    networks:
+      - hls-net
+    restart: unless-stopped
+
+networks:
+  hls-net:
+    driver: bridge
+
+volumes:
+  hls-config:

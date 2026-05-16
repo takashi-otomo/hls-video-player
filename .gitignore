@@ -81,3 +81,7 @@ library/
 converted/
 favorites.json
 .library_settings.json
+/.env
+gui-web/node_modules/
+gui-web/dist/
+gui-web/.svelte-kit/
