@@ -1,7 +1,12 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import type { Video } from './types';
-  import { favoriteIds } from './stores';
+  import {
+    favoriteIds,
+    thumbStart,
+    thumbDone,
+    thumbStop,
+  } from './stores';
   import { api } from './api';
   import { formatDuration } from './format';
 
@@ -42,6 +47,8 @@
       clearTimeout(retryTimer);
       retryTimer = null;
     }
+    // idx===0 (ポスター) が表示できたらこの動画は「読込済」
+    if (idx === 0) thumbDone(video.id);
   }
   function onImgError() {
     if (ready || retryTimer) return;
@@ -73,9 +80,11 @@
     idx = 0;
   }
 
+  onMount(() => thumbStart(video.id));
   onDestroy(() => {
     if (timer) clearInterval(timer);
     if (retryTimer) clearTimeout(retryTimer);
+    thumbStop(video.id);
   });
 
   async function toggleFav(e: MouseEvent) {
