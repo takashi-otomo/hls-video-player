@@ -8,6 +8,68 @@
   let player: any = null;
   let videojs: any = null;
 
+  // 強制ローディング UI: 実際に再生可能になる (loadedmetadata/playing)
+  // まで必ずローディングを表示。HLS が 404 (ミラー未到達/Drive EDEADLK)
+  // でも黒画面・エラーにせず、指数バックオフで自動リトライし続ける。
+  // ミラーが届けば自動的に再生が始まる (自己回復)。
+  let phase: 'loading' | 'ready' = 'loading';
+  let attempt = 0;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let watchdog: ReturnType<typeof setTimeout> | null = null;
+
+  function hidePoster(e: Event) {
+    const el = e.currentTarget as HTMLImageElement | null;
+    if (el) el.style.display = 'none';
+  }
+
+  function clearRetry() {
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+    if (watchdog) {
+      clearTimeout(watchdog);
+      watchdog = null;
+    }
+  }
+  function markReady() {
+    phase = 'ready';
+    clearRetry();
+  }
+  function reloadSource() {
+    if (!player || disposed) return;
+    attempt += 1;
+    try {
+      // query は再試行回数のみ変える。サーバのキャッシュ鍵/パス解決は
+      // pathname 基準なので不変。ミラーに届いていれば今度は 200。
+      player.src({
+        src: `${video.masterUrl}?retry=${attempt}`,
+        type: 'application/x-mpegURL',
+      });
+      player.load?.();
+    } catch {
+      /* dispose 済み等 */
+    }
+    armWatchdog();
+  }
+  function scheduleRetry() {
+    if (retryTimer || disposed || phase === 'ready') return;
+    const delay = Math.min(30000, 2000 * 2 ** Math.min(attempt, 4));
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      reloadSource();
+    }, delay);
+  }
+  // 一定時間 ready にならなければ (error イベントが出ない種類の停滞も)
+  // 再試行をスケジュール。
+  function armWatchdog() {
+    if (watchdog) clearTimeout(watchdog);
+    watchdog = setTimeout(() => {
+      watchdog = null;
+      if (phase !== 'ready') scheduleRetry();
+    }, 6000);
+  }
+
   function clamp(v: number, lo: number, hi: number) {
     return Math.max(lo, Math.min(hi, v));
   }
@@ -171,10 +233,29 @@
     attachSeekbarPreview(player, video);
     attachQualitySelector(player);
     player.options({ disableSeekWhileScrubbingOnMobile: true });
+
+    // 再生可能になったら強制ローディングを解除
+    const onReady = () => markReady();
+    player.on('loadedmetadata', onReady);
+    player.on('loadeddata', onReady);
+    player.on('canplay', onReady);
+    player.on('playing', onReady);
+    // 読み込み失敗 (HLS 404 等) は黒画面・エラー表示にせず再試行
+    player.on('error', () => {
+      if (phase === 'ready') return;
+      try {
+        player.error(null);
+      } catch {
+        /* noop */
+      }
+      scheduleRetry();
+    });
+    armWatchdog();
   });
 
   onDestroy(() => {
     disposed = true;
+    clearRetry();
     if (player) {
       try {
         player.dispose();
@@ -185,10 +266,99 @@
   });
 </script>
 
-<div class="hls-mount" bind:this={mount}></div>
+<div class="hls-stage">
+  <div class="hls-mount" bind:this={mount}></div>
+  {#if phase !== 'ready'}
+    <div class="player-loading" role="status" aria-live="polite">
+      {#if video.posterUrl}
+        <img
+          class="pl-poster"
+          src={video.posterUrl}
+          alt=""
+          aria-hidden="true"
+          on:error={hidePoster}
+        />
+      {/if}
+      <div class="pl-center">
+        <div class="pl-spinner"></div>
+        <p class="pl-title">読み込み中…</p>
+        <small class="pl-sub">
+          {#if attempt > 0}
+            ミラー未到達のため待機中・自動再試行 {attempt} 回目
+          {:else}
+            動画を準備しています
+          {/if}
+        </small>
+      </div>
+    </div>
+  {/if}
+</div>
 
 <style>
-  .hls-mount { width: 100%; max-width: 1280px; margin: 0 auto; }
+  .hls-stage {
+    position: relative;
+    width: 100%;
+    max-width: 1280px;
+    margin: 0 auto;
+    /* video.js ロード前でもローディングを正しく表示できるよう枠を確保 */
+    aspect-ratio: 16 / 9;
+  }
+  .hls-mount { width: 100%; }
+  .player-loading {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #000;
+    overflow: hidden;
+    z-index: 50;
+  }
+  /* 強制ローディング中は video.js のエラーモーダルを出さない
+     (代わりにこのローディング UI を表示し自動リトライする) */
+  :global(.hls-stage .vjs-error-display) {
+    display: none !important;
+  }
+  :global(.hls-stage .video-js.vjs-error .vjs-loading-spinner) {
+    display: none !important;
+  }
+  .player-loading .pl-poster {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    opacity: 0.25;
+    filter: blur(8px);
+  }
+  .player-loading .pl-center {
+    position: relative;
+    text-align: center;
+    color: #e8e8e8;
+  }
+  .player-loading .pl-spinner {
+    width: 46px;
+    height: 46px;
+    margin: 0 auto 0.9rem;
+    border: 3px solid rgba(255, 255, 255, 0.25);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: pl-spin 0.8s linear infinite;
+  }
+  @keyframes pl-spin {
+    to { transform: rotate(360deg); }
+  }
+  .player-loading .pl-title {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 600;
+  }
+  .player-loading .pl-sub {
+    display: block;
+    margin-top: 0.3rem;
+    font-size: 0.8rem;
+    color: #b8b8b8;
+  }
   :global(.hls-mount .video-js) {
     width: 100% !important;
     height: auto !important;
