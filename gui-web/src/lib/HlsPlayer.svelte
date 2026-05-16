@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import type { Video } from './types';
+  import { warm, release, isAvailable, warmTick } from './warmer';
 
   export let video: Video;
 
@@ -10,37 +11,30 @@
 
   // 強制ローディング UI: 実際に再生可能になる (loadedmetadata/playing)
   // まで必ずローディングを表示。HLS が 404 (ミラー未到達/Drive EDEADLK)
-  // でも黒画面・エラーにせず、指数バックオフで自動リトライし続ける。
-  // ミラーが届けば自動的に再生が始まる (自己回復)。
+  // でも黒画面・エラーにせずローディング表示。
+  // リトライ自体はグローバル warmer に委譲する (同時実行を一元管理)。
   let phase: 'loading' | 'ready' = 'loading';
   let attempt = 0;
-  let retryTimer: ReturnType<typeof setTimeout> | null = null;
-  let watchdog: ReturnType<typeof setTimeout> | null = null;
+  let reloadAt = 0;
 
   function hidePoster(e: Event) {
     const el = e.currentTarget as HTMLImageElement | null;
     if (el) el.style.display = 'none';
   }
 
-  function clearRetry() {
-    if (retryTimer) {
-      clearTimeout(retryTimer);
-      retryTimer = null;
-    }
-    if (watchdog) {
-      clearTimeout(watchdog);
-      watchdog = null;
-    }
-  }
   function markReady() {
     phase = 'ready';
-    clearRetry();
+    release(video.masterUrl); // 再生開始したら warmer から解放
   }
   function reloadSource() {
-    if (!player || disposed) return;
+    if (!player || disposed || phase === 'ready') return;
+    // 連続再 load を抑止 (warmer の通知が来てもクールダウン)
+    const now = Date.now();
+    if (now - reloadAt < 5000) return;
+    reloadAt = now;
     attempt += 1;
     try {
-      // query は再試行回数のみ変える。サーバのキャッシュ鍵/パス解決は
+      // query は再試行回数のみ変える。サーバのパス解決/キャッシュ鍵は
       // pathname 基準なので不変。ミラーに届いていれば今度は 200。
       player.src({
         src: `${video.masterUrl}?retry=${attempt}`,
@@ -50,24 +44,11 @@
     } catch {
       /* dispose 済み等 */
     }
-    armWatchdog();
   }
-  function scheduleRetry() {
-    if (retryTimer || disposed || phase === 'ready') return;
-    const delay = Math.min(30000, 2000 * 2 ** Math.min(attempt, 4));
-    retryTimer = setTimeout(() => {
-      retryTimer = null;
-      reloadSource();
-    }, delay);
-  }
-  // 一定時間 ready にならなければ (error イベントが出ない種類の停滞も)
-  // 再試行をスケジュール。
-  function armWatchdog() {
-    if (watchdog) clearTimeout(watchdog);
-    watchdog = setTimeout(() => {
-      watchdog = null;
-      if (phase !== 'ready') scheduleRetry();
-    }, 6000);
+  // warmer が masterUrl を取得できたら (= ミラー到達/キャッシュ済) 再 load。
+  // ページ遷移しても warmer 側は別途サーバを温め続ける。
+  $: if ($warmTick >= 0 && phase !== 'ready' && isAvailable(video.masterUrl)) {
+    reloadSource();
   }
 
   function clamp(v: number, lo: number, hi: number) {
@@ -240,7 +221,8 @@
     player.on('loadeddata', onReady);
     player.on('canplay', onReady);
     player.on('playing', onReady);
-    // 読み込み失敗 (HLS 404 等) は黒画面・エラー表示にせず再試行
+    // 読み込み失敗 (HLS 404 等) は黒画面・エラー表示にせず、
+    // グローバル warmer に登録して裏で取得を試行 (同時実行は一元管理)。
     player.on('error', () => {
       if (phase === 'ready') return;
       try {
@@ -248,14 +230,16 @@
       } catch {
         /* noop */
       }
-      scheduleRetry();
+      warm(video.masterUrl, 'manifest');
     });
-    armWatchdog();
+    // 最初から warmer に積む (ミラー未到達でも遷移後まで温め続ける)
+    warm(video.masterUrl, 'manifest');
   });
 
   onDestroy(() => {
     disposed = true;
-    clearRetry();
+    // player を離れたら manifest の温めは解放 (グリッドのサムネ温めを優先)
+    release(video.masterUrl);
     if (player) {
       try {
         player.dispose();

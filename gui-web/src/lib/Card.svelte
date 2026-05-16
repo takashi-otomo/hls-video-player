@@ -9,6 +9,7 @@
   } from './stores';
   import { api } from './api';
   import { formatDuration } from './format';
+  import { warm, release, isAvailable, warmTick } from './warmer';
 
   export let video: Video;
 
@@ -20,44 +21,37 @@
   $: isFav = $favoriteIds.has(video.id);
 
   // --- サムネ読み込み状態 ---
-  // 404 (Drive FUSE 未キャッシュ等) でも「リンク切れ」ではなく
-  // ローディング表示にし、裏で再試行する。キャッシュ機構と合わさり、
-  // 一度でも読めればキャッシュに乗って以降は即表示される (自己回復)。
+  // 404 (Drive 未ミラー等) でも「リンク切れ」ではなくローディング表示。
+  // リトライはこのコンポーネントではなくグローバル warmer が担う:
+  // ページ遷移/スクロールでカードが消えても warmer が裏でサーバ
+  // キャッシュを温め続け、同時実行数も一元管理される (CPU を多数の
+  // タイマで埋め尽くさない)。読めるようになったら再読込して表示。
   let ready = false;
-  let attempt = 0;
-  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let bust = 0;
   let lastBase = '';
 
   $: if (base !== lastBase) {
     lastBase = base;
     ready = false;
-    attempt = 0;
-    if (retryTimer) {
-      clearTimeout(retryTimer);
-      retryTimer = null;
-    }
+    bust = 0;
   }
-  // retry 時のみ query を付ける (サーバのキャッシュ鍵は pathname のみなので
-  // 鍵は変わらず、ブラウザの 404 キャッシュだけを回避できる)
-  $: src = attempt > 0 ? `${base}?retry=${attempt}` : base;
+  // warmer が available にしたら bust を上げて <img> を貼り直す。
+  $: if ($warmTick >= 0 && !ready && bust === 0 && isAvailable(base)) {
+    bust = 1;
+  }
+  $: src = bust > 0 ? `${base}${base.includes('?') ? '&' : '?'}w=${bust}` : base;
 
   function onImgLoad() {
     ready = true;
-    if (retryTimer) {
-      clearTimeout(retryTimer);
-      retryTimer = null;
-    }
+    release(base); // もう warmer に温めさせる必要はない
     // idx===0 (ポスター) が表示できたらこの動画は「読込済」
     if (idx === 0) thumbDone(video.id);
   }
   function onImgError() {
-    if (ready || retryTimer) return;
-    // 1.5s から指数バックオフ (上限 30s) で再試行し続ける
-    const delay = Math.min(30000, 1500 * 2 ** attempt);
-    retryTimer = setTimeout(() => {
-      retryTimer = null;
-      attempt += 1;
-    }, delay);
+    if (ready) return;
+    // グローバル warmer に登録 (同時実行制限つきで裏で再試行継続)。
+    // カードが unmount されても warmer はサーバキャッシュを温め続ける。
+    warm(base, 'image');
   }
 
   function onEnter() {
@@ -83,7 +77,7 @@
   onMount(() => thumbStart(video.id));
   onDestroy(() => {
     if (timer) clearInterval(timer);
-    if (retryTimer) clearTimeout(retryTimer);
+    // retry は warmer 側で継続させる (release しない=遷移後も温め続ける)
     thumbStop(video.id);
   });
 
