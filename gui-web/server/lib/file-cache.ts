@@ -1,10 +1,15 @@
 // サムネ等の小ファイルをローカルディスクにキャッシュする。
-// Drive FUSE は初回 read が遅い (download 待ち) ため、一度読んだら
-// CACHE_DIR (ローカル volume = 高速 SSD) に複写して以降はそこから配信する。
 //
-// キャッシュ鍵: 相対パス + 元ファイルの size/mtime。
-// 元ファイルが再変換などで変わったら size/mtime が変わり、自動的に
-// 古いキャッシュは無視されて再生成される。
+// 方針 (キャッシュ優先):
+//   - キャッシュがあれば「キャッシュを読む」。元ファイル (Drive FUSE) には
+//     一切触れない (stat も read もしない)。
+//     → Docker+Drive の EDEADLK を踏まない / 高速。
+//   - キャッシュが無ければ「実ファイルを読む」。読めたらキャッシュへ複写し、
+//     以降はキャッシュ側から配信する。
+//
+// キャッシュ鍵は相対パスのみ (sha1(relPath))。converted/ 配下の出力は
+// 一度生成されたら不変なので size/mtime は鍵に含めない。再変換などで
+// 元が変わった場合はキャッシュをクリア (`make clean` で volume 削除) する。
 import {
   existsSync,
   statSync,
@@ -20,7 +25,7 @@ import { createHash } from 'crypto';
 const CACHE_DIR = process.env.CACHE_DIR ?? '/cache';
 
 // 相対パス -> { etag, cachePath } の in-memory index。
-// プロセス内で同じファイルへの再アクセス時に stat を 1 回省ける。
+// プロセス内で同じファイルへの再アクセス時に readdir/stat を省ける。
 const memIndex = new Map<string, { etag: string; cachePath: string }>();
 
 let cacheDirReady = false;
@@ -38,35 +43,32 @@ function keyFor(relPath: string): string {
   return createHash('sha1').update(relPath).digest('hex');
 }
 
-/**
- * 元ファイルが読めない (Drive FUSE 未 materialise 等) ときに、
- * 過去にキャッシュした任意のバージョンを返すフォールバック。
- * 無ければ null (= 呼び出し側で 404)。
- */
-function staleFallback(relPath: string): CachedResult | null {
-  // 1) メモリ index
-  const mem = memIndex.get(relPath);
-  if (mem && existsSync(mem.cachePath)) {
-    try {
-      return { body: readFileSync(mem.cachePath), etag: mem.etag, notModified: false };
-    } catch {
-      /* fall through */
-    }
-  }
-  // 2) ディスクキャッシュを prefix で走査 (`<hash>_<size>_<mtime>`)
-  const prefix = keyFor(relPath) + '_';
+// キャッシュ本体 (ローカル SSD) の stat から ETag を作る。
+// ローカルなので stat は常に成功する。
+function etagOf(path: string): string {
   try {
+    const st = statSync(path);
+    return `"${st.size}-${Math.floor(st.mtimeMs)}"`;
+  } catch {
+    return '"cache"';
+  }
+}
+
+/**
+ * 既存キャッシュのパスを返す (無ければ null)。
+ * - 新形式: `<sha1(relPath)>`
+ * - 旧形式: `<sha1(relPath)>_<size>_<mtime>` も流用 (以前のキャッシュを捨てない)
+ */
+function findCache(relPath: string): string | null {
+  const key = keyFor(relPath);
+  const direct = join(CACHE_DIR, key);
+  if (existsSync(direct)) return direct;
+  try {
+    const prefix = key + '_';
     const cands = readdirSync(CACHE_DIR)
       .filter((n) => n.startsWith(prefix) && !n.endsWith('.tmp'))
       .sort();
-    if (cands.length > 0) {
-      const last = cands[cands.length - 1]; // 最新 mtime のもの
-      const cachePath = join(CACHE_DIR, last);
-      const m = last.slice(prefix.length).split('_');
-      const etag = m.length >= 2 ? `"${m[0]}-${m[1]}"` : `"stale"`;
-      memIndex.set(relPath, { etag, cachePath });
-      return { body: readFileSync(cachePath), etag, notModified: false };
-    }
+    if (cands.length > 0) return join(CACHE_DIR, cands[cands.length - 1]);
   } catch {
     /* CACHE_DIR が無い等 */
   }
@@ -76,81 +78,82 @@ function staleFallback(relPath: string): CachedResult | null {
 export interface CachedResult {
   /** 配信すべきバイト列 */
   body: Buffer;
-  /** ETag (size-mtimeMs) */
+  /** ETag (cache 本体の size-mtimeMs) */
   etag: string;
   /** クライアントの If-None-Match と一致したか (= 304 を返してよい) */
   notModified: boolean;
 }
 
 /**
- * src (Drive FUSE 上のファイル) を、ローカルキャッシュ経由で取得する。
+ * relPath のファイルを「キャッシュ優先」で取得する。
  *
- * - 元ファイルを 1 回 stat (Drive FUSE でも stat は read より遥かに軽い)
- * - etag = `${size}-${mtimeMs}` を計算
- * - If-None-Match が一致 → notModified=true (本文不要、304 にできる)
- * - キャッシュに同 etag の本文があれば local から読む (高速)
- * - 無ければ Drive から 1 回 read → cache に書く → 返す
+ * 1. キャッシュがあれば、それを読んで返す (元ファイル= Drive に触れない)
+ * 2. キャッシュが無ければ、実ファイル (srcPath) を 1 回だけ読む
+ *    - 成功: キャッシュへ atomic 書き込み → 返す
+ *    - 失敗: null (= 呼び出し側で 404。キャッシュも無いので配信不能)
  */
 export function serveCached(
   relPath: string,
   srcPath: string,
   ifNoneMatch: string | null,
 ): CachedResult | null {
-  let st;
-  try {
-    st = statSync(srcPath);
-    if (!st.isFile()) return staleFallback(relPath);
-  } catch {
-    // Drive FUSE が未 materialise / ECANCELED 等で stat 失敗。
-    // 過去に一度でもキャッシュできていればそれを返す (404 を避ける)。
-    return staleFallback(relPath);
-  }
+  // --- 1) キャッシュがあればキャッシュを読む ---
 
-  const etag = `"${st.size}-${Math.floor(st.mtimeMs)}"`;
-  if (ifNoneMatch && ifNoneMatch === etag) {
-    return { body: Buffer.alloc(0), etag, notModified: true };
-  }
-
-  ensureCacheDir();
-  const cachePath = join(CACHE_DIR, `${keyFor(relPath)}_${st.size}_${Math.floor(st.mtimeMs)}`);
-
-  // メモリ index に同 etag があれば cache から即配信
+  // 1a) メモリ index (readdir すら省く最速パス)
   const mem = memIndex.get(relPath);
-  if (mem && mem.etag === etag && existsSync(mem.cachePath)) {
+  if (mem && existsSync(mem.cachePath)) {
+    if (ifNoneMatch && ifNoneMatch === mem.etag) {
+      return { body: Buffer.alloc(0), etag: mem.etag, notModified: true };
+    }
     try {
-      return { body: readFileSync(mem.cachePath), etag, notModified: false };
+      return {
+        body: readFileSync(mem.cachePath),
+        etag: mem.etag,
+        notModified: false,
+      };
     } catch {
-      /* fall through */
+      /* キャッシュ破損 → ディスク走査 / 実ファイルへ */
     }
   }
 
-  // ディスクキャッシュにヒット
-  if (existsSync(cachePath)) {
+  // 1b) ディスク上のキャッシュ
+  const cached = findCache(relPath);
+  if (cached) {
+    const etag = etagOf(cached);
+    if (ifNoneMatch && ifNoneMatch === etag) {
+      memIndex.set(relPath, { etag, cachePath: cached });
+      return { body: Buffer.alloc(0), etag, notModified: true };
+    }
     try {
-      const body = readFileSync(cachePath);
-      memIndex.set(relPath, { etag, cachePath });
+      const body = readFileSync(cached);
+      memIndex.set(relPath, { etag, cachePath: cached });
       return { body, etag, notModified: false };
     } catch {
-      /* 壊れていたら作り直す */
+      /* キャッシュ破損 → 実ファイル読みにフォールバック */
     }
   }
 
-  // キャッシュミス: Drive FUSE から 1 回だけ読む
+  // --- 2) キャッシュが無い → 実ファイルを読む ---
   let body: Buffer;
   try {
     body = readFileSync(srcPath);
   } catch {
+    // Drive FUSE EDEADLK / 未 materialise 等。キャッシュも無いので配信不能。
     return null;
   }
 
-  // cache へ atomic 書き込み (失敗しても配信は継続)
+  // キャッシュへ atomic 書き込み (失敗しても配信は継続)
+  ensureCacheDir();
+  const cachePath = join(CACHE_DIR, keyFor(relPath));
+  let etag = `"${body.length}-0"`;
   try {
     const tmp = cachePath + '.tmp';
     writeFileSync(tmp, body);
     renameSync(tmp, cachePath);
+    etag = etagOf(cachePath);
     memIndex.set(relPath, { etag, cachePath });
   } catch {
-    /* cache 書けなくても OK */
+    /* cache 書けなくても OK (今回分は実ファイルの body を返す) */
   }
 
   return { body, etag, notModified: false };
