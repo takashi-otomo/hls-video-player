@@ -28,17 +28,22 @@
 <FilterBar />
 
 {#if showHelp}
-  <div class="help-overlay" on:click={() => (showHelp = false)} role="presentation">
-    <div class="help" on:click|stopPropagation role="dialog">
-      <h3>キーボードショートカット</h3>
-      <ul>
-        <li><kbd>/</kbd> フィルタ欄にフォーカス</li>
-        <li><kbd>?</kbd> このヘルプ</li>
-        <li>プレイヤー: <kbd>←</kbd>/<kbd>→</kbd> 前後の動画</li>
-        <li>プレイヤー: <kbd>F</kbd> お気に入り / <kbd>Esc</kbd> 閉じる</li>
-      </ul>
-      <button on:click={() => (showHelp = false)}>閉じる</button>
-    </div>
+  <!-- オーバーレイ自体をクリックで閉じる button にする (a11y) -->
+  <button
+    type="button"
+    class="help-overlay"
+    aria-label="ヘルプを閉じる"
+    on:click={() => (showHelp = false)}
+  ></button>
+  <div class="help" role="dialog" aria-modal="true" aria-label="キーボードショートカット">
+    <h3>キーボードショートカット</h3>
+    <ul>
+      <li><kbd>/</kbd> フィルタ欄にフォーカス</li>
+      <li><kbd>?</kbd> このヘルプ</li>
+      <li>プレイヤー: <kbd>←</kbd>/<kbd>→</kbd> 前後の動画</li>
+      <li>プレイヤー: <kbd>F</kbd> お気に入り / <kbd>Esc</kbd> 閉じる</li>
+    </ul>
+    <button on:click={() => (showHelp = false)}>閉じる</button>
   </div>
 {/if}
 
@@ -72,17 +77,23 @@
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.6);
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    border: none;
+    padding: 0;
+    margin: 0;
+    cursor: default;
     z-index: 100;
   }
   .help {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 1.5rem 2rem;
     max-width: 420px;
+    z-index: 101;
   }
   .help h3 { margin-top: 0; }
   .help ul { line-height: 2; padding-left: 1.2rem; }

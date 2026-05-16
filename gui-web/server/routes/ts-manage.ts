@@ -1,6 +1,11 @@
 // /api/ts — TS結合管理 (Phase 2)
 import { Hono } from 'hono';
-import { tsStatus, addToIndex, removeFromIndex } from '../lib/ts-status';
+import {
+  tsStatus,
+  addToIndex,
+  removeFromIndex,
+  deleteTsParts,
+} from '../lib/ts-status';
 
 export const tsManage = new Hono();
 
@@ -41,4 +46,9 @@ tsManage.post('/index/remove', async (c) => {
   }
   const removed = removeFromIndex(body.uuids ?? []);
   return c.json({ ok: true, removed });
+});
+
+tsManage.delete('/ts-parts/:uuid', (c) => {
+  const r = deleteTsParts(c.req.param('uuid'));
+  return c.json({ ok: true, ...r });
 });

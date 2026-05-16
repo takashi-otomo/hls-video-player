@@ -40,6 +40,32 @@
     dispatch('changed');
   }
 
+  async function deleteTsPartsChecked() {
+    const ids = [...checked].filter((id) => {
+      const e = entries.find((x) => x.uuid === id);
+      return e && (e.has_mp4 || e.has_ts) && e.part_count > 0;
+    });
+    if (ids.length === 0) {
+      alert('MP4化済みで TSパートが残っている行をチェックしてください');
+      return;
+    }
+    if (
+      !confirm(
+        `${ids.length} 件の TSパートを削除しますか？\n` +
+          'MP4 は残ります。この操作は元に戻せません。',
+      )
+    )
+      return;
+    let total = 0;
+    for (const id of ids) {
+      const r = await api.deleteTsParts(id);
+      total += r.deleted;
+    }
+    alert(`${total} ファイル削除しました`);
+    checked = new Set();
+    dispatch('changed');
+  }
+
   const STATUS_COLORS: Record<string, string> = {
     'MP4済': '#66bb6a',
     'MP4済(TS有)': '#f0c47a',
@@ -62,6 +88,7 @@
   <button on:click={selectAll}>全選択</button>
   <button on:click={deselectAll}>全解除</button>
   <button on:click={removeChecked}>📝 index から削除</button>
+  <button on:click={deleteTsPartsChecked}>🗑 TSパート削除</button>
   <span class="sep">|</span>
   {#each ['MP4済', 'MP4済(TS有)', 'TS済', '未結合', '不完全', '未DL'] as s}
     <label class="filter-chip">

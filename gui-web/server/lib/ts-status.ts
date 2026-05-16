@@ -1,5 +1,5 @@
 // ts_merge_gui.py の scan_folder_with_index 相当 (Phase 2)
-import { readdirSync, readFileSync, existsSync, statSync } from 'fs';
+import { readdirSync, readFileSync, existsSync, statSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { getLibraryRoot, convertedDirName } from './settings';
 
@@ -280,4 +280,38 @@ export function removeFromIndex(uuids: string[]): number {
     writeFileSync(p, kept.join('\n'));
   }
   return removed;
+}
+
+// 指定 uuid の TS パート (<uuid>_*-N.ts / <uuid>_partNN.ts / <uuid>.ts) を削除
+export function deleteTsParts(uuid: string): { deleted: number; freed: number } {
+  const folder = getLibraryRoot();
+  let names: string[];
+  try {
+    names = readdirSync(folder);
+  } catch {
+    return { deleted: 0, freed: 0 };
+  }
+  let deleted = 0;
+  let freed = 0;
+  for (const name of names) {
+    let base: string | null = null;
+    let m = name.match(PAT_NEW);
+    if (m) base = m[1];
+    else {
+      m = name.match(PAT_OLD);
+      if (m) base = m[1];
+      else if (name === `${uuid}.ts`) base = uuid;
+    }
+    if (base !== uuid) continue;
+    const fp = join(folder, name);
+    try {
+      const sz = statSync(fp).size;
+      unlinkSync(fp);
+      deleted++;
+      freed += sz;
+    } catch {
+      /* skip */
+    }
+  }
+  return { deleted, freed };
 }

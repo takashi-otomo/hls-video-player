@@ -1,13 +1,12 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import videojs from 'video.js';
-  import 'video.js/dist/video-js.css';
   import type { Video } from './types';
 
   export let video: Video;
 
   let mount: HTMLDivElement;
   let player: any = null;
+  let videojs: any = null;
 
   function clamp(v: number, lo: number, hi: number) {
     return Math.max(lo, Math.min(hi, v));
@@ -142,7 +141,17 @@
     p.one('dispose', () => document.removeEventListener('click', close));
   }
 
-  onMount(() => {
+  let disposed = false;
+
+  onMount(async () => {
+    // video.js は重い (~700KB) ので player ページ表示時に動的 import。
+    // これでライブラリ一覧の初期バンドルから切り離される。
+    const mod = await import('video.js');
+    // @ts-ignore CSS の動的 import
+    await import('video.js/dist/video-js.css');
+    if (disposed) return; // ロード中にページ離脱したら何もしない
+    videojs = mod.default;
+
     const el = document.createElement('video-js');
     el.className = 'video-js vjs-default-skin vjs-big-play-centered';
     el.setAttribute('controls', '');
@@ -165,6 +174,7 @@
   });
 
   onDestroy(() => {
+    disposed = true;
     if (player) {
       try {
         player.dispose();

@@ -794,6 +794,13 @@ class MainApp:
             padding=(10, 5), foreground="gray")
         self.bottom_status.pack(fill=tk.X, side=tk.BOTTOM)
 
+        # 非推奨バナー (Docker Web 版への移行案内)
+        ttk.Label(
+            self.root,
+            text="⚠ この Tkinter GUI は非推奨です — Docker Web 版 (make up → http://localhost:7860) を推奨",
+            padding=(10, 4), foreground="#e0a030",
+        ).pack(fill=tk.X, side=tk.BOTTOM)
+
     def _log(self, message: str):
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log_text.config(state=tk.NORMAL)
@@ -3079,6 +3086,21 @@ def run_gui(
     if not Path(folder).is_dir():
         print(f"エラー: ディレクトリが見つかりません: {folder}", file=sys.stderr)
         return 1
+
+    # Docker Web 版への移行案内 (この Tkinter GUI は非推奨)
+    print(
+        "\n"
+        "  ─────────────────────────────────────────────────────────────\n"
+        "  ⚠  この Tkinter GUI は非推奨です。\n"
+        "     ホストを汚染しない Docker Web 版への移行を推奨します:\n"
+        "\n"
+        "       cd <repo> && make up   → http://localhost:7860\n"
+        "\n"
+        "     詳細: docs/migration-plan/README.md\n"
+        "  ─────────────────────────────────────────────────────────────\n",
+        file=sys.stderr,
+        flush=True,
+    )
 
     debug(f"folder={folder}, index_file={index_file}, api_port={api_port}, "
           f"player_port={player_port}, start_player={start_player}")

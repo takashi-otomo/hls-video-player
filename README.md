@@ -1,8 +1,63 @@
-# HLS Video Player (Python + Gradio)
+# HLS Video Player
 
-MP4 ソースを HLS（HTTP Live Streaming）に変換し、ブラウザ上で **アダプティブビットレート再生** と **シークバー上のサムネイルプレビュー** を実現する動画再生アプリ。
+MP4 / TS ソースを HLS（HTTP Live Streaming）に変換し、ブラウザ上で **アダプティブビットレート再生** と **シークバー上のサムネイルプレビュー** を実現する動画ライブラリアプリ。
 
-本プロジェクトは Python + Gradio + FastAPI で動作します。ローカル Docker と Google Colab の両方で同一コードが動きます。
+---
+
+## 🚀 推奨: Docker Web 版 (Bun + Svelte)
+
+ホストを汚染せず Docker だけで動く Web GUI。**新規利用はこちらを推奨**します。
+
+```bash
+# 1. 動画フォルダのパスを .env に設定
+cp .env.example .env
+$EDITOR .env          # LIBRARY_PATH=/path/to/your/library
+
+# 2. 起動 (Docker Desktop が必要)
+make up               # → http://localhost:7860
+
+# その他
+make dev              # 開発モード (Vite HMR, http://localhost:5173)
+make down             # 停止
+make logs             # ログ
+make restart          # 再ビルドして再起動
+make clean            # コンテナ + ボリューム削除
+```
+
+| 機能 | 内容 |
+|---|---|
+| ライブラリ | グリッド表示・サムネ・ホバー slideshow・お気に入り・フィルタ |
+| プレイヤー | HLS 再生・前/次ナビ・★・キーボード ←→ F Esc |
+| TS結合管理 | index.md 編集・状態一覧・TSパート削除 |
+| 変換 | HLS 変換 / TS 結合をブラウザから実行 (ログ WebSocket streaming) |
+| PWA | ブラウザの「インストール」でドック登録可能 |
+
+- ホスト依存: **Docker Desktop のみ** (Bun / Node.js / Python / ffmpeg は全てコンテナ内)
+- 設計詳細: [docs/migration-plan/](docs/migration-plan/README.md)
+- 構成: `gui` (Bun+Hono+Svelte) + `converter` (Python+ffmpeg) の 2 コンテナ
+- `favorites.json` / `converted/` は Python 版と共有 (並行運用可)
+- 困ったときは [docs/troubleshoot.md](docs/troubleshoot.md)
+
+> ⚠ `make` を使わない場合は `docker compose --env-file .env -f docker/docker-compose.yml up` のように `--env-file .env` を必ず付けてください (compose ファイルが `docker/` 配下にあるため)。
+
+---
+
+## CLI ツール (pipx)
+
+変換だけをコマンドラインで行う場合:
+
+```bash
+pipx install --force "/path/to/hls-video-player[gui,app]"
+hls-convert /path/to/library -w 4     # HLS 変換
+ts-merge /path/to/library             # TS 結合
+ts-merge --gui /path/to/library       # 旧 Tkinter GUI (非推奨、Docker 版へ移行を)
+```
+
+---
+
+## Python + Gradio 版 (レガシー / Colab 用)
+
+以下は Python + Gradio + FastAPI で動作する旧構成です。Google Colab では引き続きこちらを使用します（`colab_launch.ipynb`）。ローカルでの新規利用は Docker Web 版を推奨します。
 
 ## 特徴
 

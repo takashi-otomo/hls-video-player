@@ -60,6 +60,11 @@ export const api = {
         body: JSON.stringify({ uuids }),
       },
     ),
+  deleteTsParts: (uuid: string) =>
+    jsonFetch<{ ok: boolean; deleted: number; freed: number }>(
+      `/api/ts/ts-parts/${encodeURIComponent(uuid)}`,
+      { method: 'DELETE' },
+    ),
   startConvert: (opts: {
     type: 'hls' | 'ts-merge';
     filter?: string;
