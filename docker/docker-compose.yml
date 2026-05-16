@@ -11,9 +11,11 @@ services:
     volumes:
       - "${LIBRARY_PATH:?LIBRARY_PATH を .env で設定してください}:/library"
       - hls-config:/config
+      - hls-cache:/cache
     environment:
       LIBRARY_ROOT: /library
       HLS_SETTINGS_FILE: /config/settings.json
+      CACHE_DIR: /cache
       PORT: 7860
       NODE_ENV: production
     networks:
@@ -45,3 +47,4 @@ networks:
 
 volumes:
   hls-config:
+  hls-cache:
