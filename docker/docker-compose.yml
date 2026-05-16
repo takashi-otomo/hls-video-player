@@ -10,10 +10,14 @@ services:
       - "${PORT:-7860}:7860"
     volumes:
       - "${LIBRARY_PATH:?LIBRARY_PATH を .env で設定してください}:/library"
+      # ハイブリッド: ローカルミラー (make mirror の出力) を読み取り専用で
+      # マウント。本文はここに在ればローカルから配信、無ければ Drive。
+      - "${MIRROR_PATH:-../local-library}:/mirror:ro"
       - hls-config:/config
       - hls-cache:/cache
     environment:
       LIBRARY_ROOT: /library
+      MIRROR_ROOT: /mirror
       HLS_SETTINGS_FILE: /config/settings.json
       CACHE_DIR: /cache
       PORT: 7860

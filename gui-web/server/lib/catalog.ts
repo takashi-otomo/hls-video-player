@@ -1,8 +1,13 @@
 // library_catalog.py 相当: converted/ を走査して動画メタを返す
 import { readFileSync, existsSync, readdirSync, statSync } from 'fs';
-import { join, extname } from 'path';
-import { getLibraryRoot, convertedDirName } from './settings';
+import { extname } from 'path';
 import { loadFavorites } from './favorites';
+import {
+  driveConverted,
+  mirrorConverted,
+  resolveConverted,
+  convertedExists,
+} from './hybrid';
 
 const THUMB_PERCENTS = [5, 30, 50, 60, 80];
 const LIBRARY_URL_PREFIX = '/library';
@@ -30,9 +35,6 @@ function stemUrl(stem: string, rel: string): string {
   return `${LIBRARY_URL_PREFIX}/${encodeURIComponent(stem)}/${rel}`;
 }
 
-function convertedRoot(): string {
-  return join(getLibraryRoot(), convertedDirName());
-}
 
 function formatLabel(sourceFilename: string, codec: string): string {
   const parts: string[] = [];
@@ -56,10 +58,10 @@ function formatLabel(sourceFilename: string, codec: string): string {
 const metaCache = new Map<string, { entry: VideoEntry; mtimeMs: number }>();
 
 function entryForStem(stem: string, favorites: Set<string>): VideoEntry | null {
-  const base = join(convertedRoot(), stem);
-  const masterPath = join(base, 'hls', 'master.m3u8');
-  const posterPath = join(base, 'thumbs', 'poster.png');
-  const metaPath = join(base, 'meta.json');
+  // 各ファイルはミラー優先で解決 (無ければ Drive パス)
+  const masterPath = resolveConverted(`${stem}/hls/master.m3u8`);
+  const posterPath = resolveConverted(`${stem}/thumbs/poster.png`);
+  const metaPath = resolveConverted(`${stem}/meta.json`);
 
   if (!existsSync(masterPath) || !existsSync(posterPath) || !existsSync(metaPath)) {
     return null;
@@ -93,7 +95,7 @@ function entryForStem(stem: string, favorites: Set<string>): VideoEntry | null {
   const thumbs: Array<{ percent: number; url: string }> = [];
   for (const f of framesMeta) {
     if (!f.file) continue;
-    if (!existsSync(join(base, f.file))) continue;
+    if (!convertedExists(`${stem}/${f.file}`)) continue;
     thumbs.push({ percent: Number(f.percent) || 0, url: stemUrl(stem, f.file) });
   }
 
@@ -119,18 +121,25 @@ function entryForStem(stem: string, favorites: Set<string>): VideoEntry | null {
   return entry;
 }
 
-export function listVideos(): VideoEntry[] {
-  const root = convertedRoot();
-  if (!existsSync(root)) return [];
-  const favorites = loadFavorites();
-  let names: string[];
+function readdirSafe(dir: string | null): string[] {
+  if (!dir || !existsSync(dir)) return [];
   try {
-    names = readdirSync(root);
+    return readdirSync(dir);
   } catch {
     return [];
   }
+}
+
+export function listVideos(): VideoEntry[] {
+  const favorites = loadFavorites();
+  // 列挙は Drive (stat/readdir は EDEADLK しない) とミラーの和集合。
+  // Drive が一覧を返せなくてもミラー側だけで表示できる。
+  const names = new Set<string>([
+    ...readdirSafe(driveConverted()),
+    ...readdirSafe(mirrorConverted()),
+  ]);
   const out: VideoEntry[] = [];
-  for (const name of names.sort()) {
+  for (const name of [...names].sort()) {
     if (name.startsWith('.')) continue;
     const entry = entryForStem(name, favorites);
     if (entry) out.push(entry);

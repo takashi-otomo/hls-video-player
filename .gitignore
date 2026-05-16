@@ -19,6 +19,9 @@ desktop.ini
 .env.*
 !.env.example
 
+# ローカルミラー (make mirror の出力。Drive→ローカル複製・巨大)
+local-library/
+
 # Claude Code のワークスペース固有設定
 .claude/
 
