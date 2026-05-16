@@ -17,8 +17,8 @@ help:
 	@echo "make ps      — コンテナ状態"
 	@echo "make config  — compose 設定の検証"
 	@echo "make clean   — コンテナ + ボリューム削除"
-	@echo "make mirror  — Drive の LIBRARY_PATH を ./local-library へ rsync"
-	@echo "               (Docker+Drive FUSE の EDEADLK 回避用)"
+	@echo "make mirror  — Drive の converted/ を ./local-library へ rsync"
+	@echo "               (Docker+Drive FUSE の EDEADLK 回避用・原本mp4は除外)"
 
 up:
 	$(COMPOSE) up -d
@@ -51,14 +51,15 @@ mirror:
 	@set -a; . ./.env; set +a; \
 	test -n "$$LIBRARY_PATH" || (echo "LIBRARY_PATH 未設定"; exit 1); \
 	mkdir -p ./local-library; \
-	echo "rsync: $$LIBRARY_PATH/ → ./local-library/ (converted/ + index.md + favorites.json + *.mp4)"; \
-	rsync -a --info=progress2 \
+	echo "rsync: $$LIBRARY_PATH/ → ./local-library/ (converted/ + index.md + favorites.json)"; \
+	echo "  ※ 原本 mp4 等は複製しません (Web 版は HLS 再生なので不要・原本は Drive に温存)"; \
+	echo "  ※ 進捗は別端末で: watch 'find ./local-library -type f | wc -l'"; \
+	rsync -a \
 	  --include='converted/***' \
 	  --include='index.md' \
 	  --include='favorites.json' \
-	  --include='*.mp4' --include='*.mkv' --include='*.mov' --include='*.webm' \
 	  --exclude='*' \
-	  "$$LIBRARY_PATH/" ./local-library/ ; \
+	  "$$LIBRARY_PATH/" ./local-library/ || { echo "rsync 失敗"; exit 1; }; \
 	echo ""; \
 	echo "完了。 .env を以下に変更して make restart:"; \
 	echo "  LIBRARY_PATH=$$PWD/local-library"
